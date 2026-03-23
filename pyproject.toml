@@ -5,6 +5,7 @@ description = "LLM project"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "llm_sdk @ file://${PROJECT_ROOT}/llm_sdk",
     "numpy>=2.4.3",
     "pydantic>=2.12.5",
 ]
