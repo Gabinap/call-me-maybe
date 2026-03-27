@@ -88,8 +88,6 @@ def functions_def_parsing(f_d_file: str) -> list[FunctionDef]:
         except KeyError as e:
             print(f"Skipping function with missing key: {e}")
             continue
-    # print in blue
-    print(f"\033[94mValid functions: {valid_functions}\033[0m")
     return valid_functions
 
 
