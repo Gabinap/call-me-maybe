@@ -23,8 +23,9 @@ def get_vocabulary(model_instance: Small_LLM_Model) -> dict[str, int]:
 def get_valid_function_name(
     reverse_vocab: dict[int, str],
     model_instance: Small_LLM_Model,
-    encoded: list[int],
     functions: list[FunctionDef],
+    prompt: str,
+    encoded_func_names: list[int],
 ) -> tuple[list[int], str]:
     """Generate and validate a function name using the language model.
 
@@ -39,6 +40,11 @@ def get_valid_function_name(
         encoded: List of encoded token IDs for the model input.
         functions: List of available function definitions to validate against.
     """
+    prompt_prefix = f'\n[\n  {{\n    "prompt": "{prompt},\n    "name": "'
+    print(prompt_prefix, end="", flush=True)
+    encoded: list[int] = (
+        encoded_func_names + model_instance.encode(prompt_prefix)[0].tolist()
+    )
     valid_function_names: list[str] = [fname.name for fname in functions]
     decoded: list[str] = [""]
     clean_name: str = ""
@@ -56,7 +62,7 @@ def get_valid_function_name(
         ]
         if len(matching_functions) == 1:
             # Only one function matches, write the rest directly
-            remaining: str = matching_functions[0][len(clean_name):]
+            remaining: str = matching_functions[0][len(clean_name) :]
             encoded.extend(model_instance.encode(remaining)[0].tolist())
             print(remaining, end="", flush=True)
             clean_name = matching_functions[0]
@@ -97,7 +103,7 @@ def get_valid_function_name(
         encoded.append(next_token_id)
         print(decoded[-1], end="", flush=True)
     encoded.append(model_instance.encode('",')[0].tolist()[0])
-    print('",')
+    print('",', end="", flush=True)
     return encoded, clean_name
 
 
@@ -116,7 +122,29 @@ def get_function_parameters(
         encoded: List of encoded token IDs for the model input.
         functions: List of available function definitions.
     """
-    pass
+    parameters_prefix: str = '\n    "parameters": {'
+    print(parameters_prefix, end="", flush=True)
+    encoded.extend(model_instance.encode(parameters_prefix)[0].tolist())
+    params = next(
+        (f.parameters for f in functions if f.name == func_name), {}
+    )
+    encoded = model_instance.encode("function parameters: " + str(params))[0].tolist() + encoded
+    decoded: list[str] = [""]
+    parameter_names: list[str] = (
+        list(params.keys()) if isinstance(params, dict) else [str(params)]
+    )
+    for param in parameter_names:
+        next_param_prefix: str = "\n" + ' '*19 + f'"{param}": "'
+        print(next_param_prefix, end="", flush=True)
+        encoded.extend(model_instance.encode(next_param_prefix)[0].tolist())
+        print("\033[91m" + model_instance.decode(encoded) + "\033[0m")
+        while '"' not in decoded[-1]:
+            print(param, end="", flush=True)
+            logits: list[float] = model_instance.get_logits_from_input_ids(encoded)
+            best_token: int = max(int(logit) for logit in logits)
+            decoded.append(model_instance.decode([best_token]))
+            encoded.append(best_token)
+            print(decoded[-1], end="", flush=True)
 
 
 def start_generation(args: Args, model: str) -> None:
@@ -137,19 +165,15 @@ def start_generation(args: Args, model: str) -> None:
     ].tolist()
     reverse_vocab: dict[int, str] = {v: k for k, v in vocab.items()}
     for prompt in args.prompts:
-        prompt_prefix = f'\n[\n  {{\n    "prompt": "{prompt},\n    "name": "'
-        print(prompt_prefix, end="", flush=True)
-        encoded: list[int] = (
-            encoded_func_names
-            + model_instance.encode(prompt_prefix)[0].tolist()
-        )
         encoded, func_name = get_valid_function_name(
-            reverse_vocab, model_instance, encoded, args.functions
+            reverse_vocab,
+            model_instance,
+            args.functions,
+            prompt,
+            encoded_func_names,
         )
-        encoded = encoded[len(encoded_func_names):]
+        encoded = encoded[len(encoded_func_names) :]
         # TODO rajouter les args de la fonction en context, peut etre quy a pas besoin
-        # print in red, all the context
-        print("\033[91m" + model_instance.decode(encoded) + "\033[0m")
         get_function_parameters(
             reverse_vocab, model_instance, encoded, args.functions, func_name
         )

@@ -4,7 +4,7 @@ import argparse
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class Args(BaseModel):
@@ -33,9 +33,11 @@ class Args(BaseModel):
 class FunctionDef(BaseModel):
     name: str
     description: str
-    returns_: str = Field(..., alias="returns")
+    parameters: dict[str, Any] | None
+    returns_: str | None = Field(..., alias="returns")
 
     @field_validator("name", "description", "returns_")
+    @classmethod
     def not_empty(cls, v):
         if not v or not v.strip():
             raise ValueError("Field cannot be empty")
@@ -45,7 +47,7 @@ class FunctionDef(BaseModel):
 def functions_def_parsing(f_d_file: str) -> list[FunctionDef]:
     """Parse functions definition with validation."""
     try:
-        with open(f_d_file, "r", encoding="utf-8") as f:
+        with open(f_d_file, encoding="utf-8") as f:
             json_f_d = json.load(f)
     except FileNotFoundError:
         print(f"Error: File {f_d_file} not found")
@@ -86,7 +88,8 @@ def functions_def_parsing(f_d_file: str) -> list[FunctionDef]:
         except KeyError as e:
             print(f"Skipping function with missing key: {e}")
             continue
-
+    # print in blue
+    print(f"\033[94mValid functions: {valid_functions}\033[0m")
     return valid_functions
 
 
@@ -122,7 +125,7 @@ def command_parsing() -> dict[str, str]:
 def prompt_parsing(input_file: str) -> list[str]:
     """Parse prompt file with validation."""
     try:
-        with open(input_file, "r", encoding="utf-8") as f:
+        with open(input_file, encoding="utf-8") as f:
             json_prompts = json.load(f)
     except FileNotFoundError:
         print(f"Error: File {input_file} not found")
@@ -144,6 +147,8 @@ def prompt_parsing(input_file: str) -> list[str]:
         prompt = item.get("prompt", "")
         if isinstance(prompt, str) and len(prompt) < 300:
             prompts.append(prompt)
+        else:
+            print("Warning: Skipping invalid prompt")
 
     return prompts
 
