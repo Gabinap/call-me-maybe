@@ -34,11 +34,10 @@ def start_generation(args: Args, model: str) -> None:
     func_names: str = ", ".join(name.name for name in args.functions)
     model_instance = Small_LLM_Model(model_name=model)
     vocab: dict[str, int] = get_vocabulary(model_instance)
-    encoded_func_names: list[int] = model_instance.encode(func_names)[
-        0
-    ].tolist()
+    encoded_func_names: list[int] = model_instance.encode(func_names)[0].tolist()
     reverse_vocab: dict[int, str] = {v: k for k, v in vocab.items()}
-    for prompt in args.prompts[:1]:
+    print("[")
+    for prompt in args.prompts[8:12]:  # TODO enlever le slicing
         encoded, func_name = get_valid_function_name(
             reverse_vocab,
             model_instance,
@@ -47,10 +46,14 @@ def start_generation(args: Args, model: str) -> None:
             encoded_func_names,
         )
         encoded = encoded[len(encoded_func_names) :]
-        # TODO rajouter les args de la fonction en context, peut etre quy a pas besoin
         get_function_parameters(
-            reverse_vocab, model_instance, encoded, args.functions, func_name
+            reverse_vocab,
+            model_instance,
+            encoded,
+            next(function for function in args.functions if function.name == func_name),
+            prompt,
         )
+    print("]")
 
 
 def main(model: str = "Qwen/Qwen3-0.6B") -> None:

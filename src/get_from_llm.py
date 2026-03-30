@@ -31,7 +31,7 @@ def get_valid_function_name(
         encoded: List of encoded token IDs for the model input.
         functions: List of available function definitions to validate against.
     """
-    prompt_prefix = f'\n[\n  {{\n    "prompt": "{prompt},\n    "name": "'
+    prompt_prefix = f'\n  {{\n    "prompt": "{prompt}",\n    "name": "'
     print(prompt_prefix, end="", flush=True)
     encoded: list[int] = (
         encoded_func_names + model_instance.encode(prompt_prefix)[0].tolist()
@@ -47,9 +47,7 @@ def get_valid_function_name(
 
         # Check if clean_name matches exactly one function
         matching_functions: list[str] = [
-            fname
-            for fname in valid_function_names
-            if fname.startswith(clean_name)
+            fname for fname in valid_function_names if fname.startswith(clean_name)
         ]
         if len(matching_functions) == 1:
             # Only one function matches, write the rest directly
@@ -67,9 +65,7 @@ def get_valid_function_name(
             if starts_ok and longer:
                 valid_next_chars.add(
                     "".join(
-                        c
-                        for c in func_name
-                        if func_name.index(c) > len(clean_name)
+                        c for c in func_name if func_name.index(c) > len(clean_name)
                     )
                 )
 
@@ -102,8 +98,8 @@ def get_function_parameters(
     reverse_vocab: dict[int, str],
     model_instance: Small_LLM_Model,
     encoded: list[int],
-    functions: list[FunctionDef],
-    func_name: str,
+    function_def: FunctionDef,
+    prompt: str,
 ) -> None:
     """Generate function parameters for the given function name.
 
@@ -116,32 +112,39 @@ def get_function_parameters(
     parameters_prefix: str = '\n    "parameters": {'
     print(parameters_prefix, end="", flush=True)
     encoded.extend(model_instance.encode(parameters_prefix)[0].tolist())
-    params: dict[str, Any] | None = next(
-        (f.parameters for f in functions if f.name == func_name), {}
+    params: dict[str, Any] | None = (
+        function_def.parameters if function_def and function_def.parameters else None
     )
-    encoded = model_instance.encode(str(params))[0].tolist() + encoded
     if params is None:
-        print("\n" + " " * 19 + "}\n    }\n]")
+        print("\n" + " " * 19 + "}\n    }")
         return
+    context = (
+        f'User prompt: "{prompt}"\n'
+        f"Function description: {function_def.description}\n"
+        f"Function name: {function_def.name}\n"
+        f"Parameters: {', '.join(params.keys())}\n"
+    )
     for param_name, param_dict in params.items():
+        context += f"{param_name}: "
         param_value = param_dict.get("type")
-        next_param_prefix: str = (
-            "\n" + " " * 19 + f'"{param_name}": '
-        )
+        next_param_prefix: str = "\n" + " " * 19 + f'"{param_name}": '
         print(next_param_prefix, end="", flush=True)
         encoded.extend(model_instance.encode(next_param_prefix)[0].tolist())
         if param_value == "number":
-            encoded = process_number(model_instance, encoded, reverse_vocab)
+            encoded, printable = process_number(model_instance, encoded, reverse_vocab)
         elif param_value == "integer":
-            encoded = process_integer(model_instance, encoded, reverse_vocab)
+            encoded, printable = process_integer(model_instance, encoded, reverse_vocab)
         elif param_value == "string":
-            encoded = process_string(model_instance, encoded, reverse_vocab)
+            encoded, printable = process_string(
+                model_instance, reverse_vocab, prompt, context
+            )
         else:
-            encoded = process_anything(model_instance, encoded, reverse_vocab)
-        # verifier que les elements actuels ne soient pas les derniers, sinon ecrire "'"
+            encoded, printable = process_anything(model_instance, encoded, reverse_vocab)
         if param_name != list(params.keys())[-1]:
             print(",", end="", flush=True)
-            encoded.extend(model_instance.encode(",")[0].tolist())
+            if param_name != "integer" and param_name != "number":
+                encoded.extend(model_instance.encode(",")[0].tolist())
+        context += f"{printable}\n"
 
-    print("\n" + " " * 19 + "}\n    }\n]")
+    print("\n" + " " * 19 + "}\n    }")
     print("\033[91m" + model_instance.decode(encoded) + "\033[0m")
