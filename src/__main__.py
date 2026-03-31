@@ -1,4 +1,6 @@
 import json
+import os
+from typing import Any
 
 from llm_sdk import Small_LLM_Model
 
@@ -13,31 +15,61 @@ def get_vocabulary(model_instance: Small_LLM_Model) -> dict[str, int]:
         model_instance: The language model instance to extract vocabulary from.
 
     Returns:
-        A dictionary mapping vocabulary words to their token IDs.
+        A dictionary mapping token strings to their token IDs.
     """
-    vocab_file_path = model_instance.get_path_to_vocab_file()
-    with open(vocab_file_path) as f:
-        vocab = json.load(f)
-    return vocab
+    with open(model_instance.get_path_to_vocab_file()) as f:
+        return json.load(f)
+
+
+def write_output(results: list[dict[str, Any]], output_path: str) -> None:
+    """Write the results list to a JSON file, creating parent dirs if needed.
+
+    Args:
+        results: List of result dicts, each with prompt/name/parameters keys.
+        output_path: Destination file path.
+    """
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        print(f"\nOutput written to {output_path}", flush=True)
+    except OSError as e:
+        print(f"\nError: could not write output file — {e}", flush=True)
 
 
 def start_generation(args: Args, model: str) -> None:
     """Generate function call completions for the given prompts.
 
-    For each prompt, constructs a JSON structure and uses the language model to
-    generate valid function names from the available functions.
+    For each prompt, uses the language model to select a function and generate
+    its arguments using constrained decoding. Results are printed incrementally
+    to stdout and written as a JSON array to ``args.output``.
 
     Args:
-        args: Command-line arguments containing prompts and functions.
+        args: Parsed arguments containing prompts, function definitions, and mode.
         model: The name/path of the language model to use.
     """
-    func_names: str = ", ".join(name.name for name in args.functions)
+    fast: bool = args.mode == "fast"
+
     model_instance = Small_LLM_Model(model_name=model)
+
     vocab: dict[str, int] = get_vocabulary(model_instance)
-    encoded_func_names: list[int] = model_instance.encode(func_names)[0].tolist()
     reverse_vocab: dict[int, str] = {v: k for k, v in vocab.items()}
-    print("[")
-    for prompt in args.prompts[8:12]:  # TODO enlever le slicing
+    decoded_vocab: dict[int, str] = {
+        t: model_instance.decode([t]) for t in reverse_vocab
+    }
+
+    func_names: str = ", ".join(f.name for f in args.functions)
+    encoded_func_names: list[int] = model_instance.encode(func_names)[0].tolist()
+
+    results: list[dict[str, Any]] = []
+
+    # `[` has no trailing newline: the leading `\n` in each prompt_prefix acts as
+    # the line separator between entries and as the single newline after `[`.
+    print("[", end="", flush=True)
+
+    for i, prompt in enumerate(args.prompts):
         encoded, func_name = get_valid_function_name(
             reverse_vocab,
             model_instance,
@@ -45,21 +77,37 @@ def start_generation(args: Args, model: str) -> None:
             prompt,
             encoded_func_names,
         )
-        encoded = encoded[len(encoded_func_names) :]
-        get_function_parameters(
+        encoded = encoded[len(encoded_func_names):]
+        function_def = next(f for f in args.functions if f.name == func_name)
+
+        parameters: dict[str, Any] = get_function_parameters(
             reverse_vocab,
             model_instance,
             encoded,
-            next(function for function in args.functions if function.name == func_name),
+            function_def,
             prompt,
+            decoded_vocab,
+            fast=fast,
         )
+
+        results.append({
+            "prompt": prompt,
+            "name": func_name,
+            "parameters": parameters,
+        })
+
+        # No trailing newline: next entry's leading `\n` (prompt_prefix) provides it.
+        if i < len(args.prompts) - 1:
+            print("\n  },", end="", flush=True)
+        else:
+            print("\n  }")  # last entry: print's own \n separates from `]`
+
     print("]")
+    write_output(results, args.output)
 
 
 def main(model: str = "Qwen/Qwen3-0.6B") -> None:
     """Main entry point for the function calling generation task.
-
-    Parses command-line arguments and initiates the generation process.
 
     Args:
         model: The language model to use (default: Qwen/Qwen3-0.6B).
