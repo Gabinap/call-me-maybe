@@ -147,7 +147,7 @@ def get_function_parameters(
         function_def.parameters if function_def and function_def.parameters else None
     )
     if params is None:
-        print('\n    }', end="", flush=True)
+        print("\n    }", end="", flush=True)
         return {}
 
     context: str = (
@@ -194,5 +194,5 @@ def get_function_parameters(
             if param_type not in ("number", "integer"):
                 encoded.extend(model_instance.encode(",")[0].tolist())
 
-    print('\n    }', end="", flush=True)
+    print("\n    }", end="", flush=True)
     return result

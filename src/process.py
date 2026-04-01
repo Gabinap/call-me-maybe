@@ -19,10 +19,15 @@ _STRING_COMPLETE = re.compile(r'^([^"\\]|\\.)*"$')
 _ANYTHING_PREFIX = re.compile(r"^[^,}]*$")
 _ANYTHING_COMPLETE = re.compile(r"^[^,}]*[,}]$")
 
+# Characters that may appear at the end of a raw generated value and must
+# be stripped before the value is returned to the caller.
+_TERMINAL_CHARS = ",} \n\r\t"
+
 
 # ---------------------------------------------------------------------------
 # Core generation primitive
 # ---------------------------------------------------------------------------
+
 
 def score_candidates(
     model_instance: Small_LLM_Model,
@@ -32,13 +37,19 @@ def score_candidates(
     complete_pattern: re.Pattern,
     num_beams: int = 1,
     max_tokens: int = 50,
-    forced_starts: list[int | None] | None = None,
+    stream: bool | None = None,
 ) -> tuple[list[int], str, float]:
     """Run beam search constrained by prefix/complete patterns.
 
-    Streaming is derived automatically: tokens are printed immediately when
-    exactly one beam is running (``effective_count == 1``). Terminal tokens
-    are never printed — callers handle them.
+    Streaming behaviour is controlled by ``stream``:
+    - ``None`` (default): auto-derived — stream if and only if exactly one
+      beam is running (``len(start_ids) == 1``).
+    - ``False``: always silent, regardless of beam count. Used internally by
+      ``_score_with_negative`` so that comparison beams never print.
+
+    The terminal token IS included in the returned token sequence so the
+    model retains full context. The terminal character is stripped from the
+    returned value string.
 
     Args:
         model_instance: The language model instance.
@@ -46,13 +57,9 @@ def score_candidates(
         decoded_vocab: Precomputed mapping (token ID -> clean decoded string).
         prefix_pattern: Regex that a valid partial value must satisfy.
         complete_pattern: Regex that a complete value must satisfy.
-        num_beams: Number of beams when ``forced_starts`` is not provided.
+        num_beams: Number of independent beams; best average-score one returned.
         max_tokens: Maximum tokens per beam before forcing termination.
-        forced_starts: If provided, overrides ``num_beams``. Each entry is
-                       either a token ID (forced first token for that beam) or
-                       ``None`` (pick the best token freely from the vocab).
-                       Two entries → 2 beams → no streaming; one entry → 1
-                       beam → streaming.
+        stream: Streaming override. ``None`` = auto, ``False`` = always silent.
 
     Returns:
         Tuple of (full token sequence including terminal, value without
@@ -66,25 +73,20 @@ def score_candidates(
     ]
 
     logits: list[float] = model_instance.get_logits_from_input_ids(encoded_context)
+    best_start_ids: list[int] = heapq.nlargest(
+        num_beams, valid_start_ids, key=lambda t: logits[t]
+    )
 
-    if forced_starts is not None:
-        best_free: int = max(valid_start_ids, key=lambda t: logits[t])
-        start_ids: list[int] = [
-            best_free if fs is None else fs for fs in forced_starts
-        ]
-    else:
-        start_ids = heapq.nlargest(num_beams, valid_start_ids, key=lambda t: logits[t])
-
-    # Stream only when a single beam is running
-    stream: bool = len(start_ids) == 1
+    # Resolve streaming: auto means stream iff exactly one beam
+    do_stream: bool = (len(best_start_ids) == 1) if stream is None else stream
 
     beams: list[tuple[list[int], str, list[float]]] = [
-        (encoded_context + [t], decoded_vocab[t], [logits[t]])
-        for t in start_ids
+        (encoded_context + [t], decoded_vocab[t], [logits[t]]) for t in best_start_ids
     ]
 
-    if stream and start_ids:
-        first_str = decoded_vocab[start_ids[0]]
+    # Stream the first token of the single beam if it is not already terminal
+    if do_stream and best_start_ids:
+        first_str = decoded_vocab[best_start_ids[0]]
         if not complete_pattern.match(first_str):
             print(first_str, end="", flush=True)
 
@@ -100,7 +102,8 @@ def score_candidates(
                 break
 
             valid_token_ids: list[int] = [
-                t for t, s in decoded_vocab.items()
+                t
+                for t, s in decoded_vocab.items()
                 if prefix_pattern.match(current_str + s)
                 or complete_pattern.match(current_str + s)
             ]
@@ -117,14 +120,19 @@ def score_candidates(
             scores.append(step_logits[best])
 
             next_str = current_str + decoded_vocab[best]
-            if stream and not complete_pattern.match(next_str):
+            if do_stream and not complete_pattern.match(next_str):
                 print(decoded_vocab[best], end="", flush=True)
 
             current_tokens.append(best)
             current_str = next_str
 
         avg_score: float = sum(scores) / len(scores) if scores else float("-inf")
-        value: str = current_str[:-1] if complete_pattern.match(current_str) else current_str
+        # Strip the terminal character AND any trailing whitespace that BPE
+        # tokens may have embedded (e.g. a "}\n" token would leave a stray \n)
+        value: str = (
+            current_str[:-1] if complete_pattern.match(current_str) else current_str
+        )
+        value = value.rstrip(_TERMINAL_CHARS)
         completed.append((current_tokens, value, avg_score))
 
     best_tokens, best_value, best_score = max(completed, key=lambda x: x[2])
@@ -134,6 +142,7 @@ def score_candidates(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_minus_token(
     decoded_vocab: dict[int, str],
@@ -158,31 +167,67 @@ def _score_with_negative(
     complete_pattern: re.Pattern,
     strip_chars: str,
 ) -> tuple[list[int], str]:
-    """Run a free beam and a forced-negative beam; return the best result.
+    """Run a free beam and a forced-negative beam silently; return the best.
 
-    Uses ``forced_starts=[None, minus_id]`` → 2 beams → no streaming.
-    Both beams are compared silently; the caller prints the winner.
+    Both beams use ``stream=False`` so nothing is printed during comparison.
+    The '-' token is injected into the *context* of the negative beam (not
+    scored as a beam token) so both beams are compared fairly on digit logits.
+    The caller is responsible for printing the winning value.
     """
-    minus_id = _get_minus_token(decoded_vocab, encoded, model_instance)
-
-    if minus_id is None:
-        result_tokens, value, _ = score_candidates(
-            model_instance, encoded, decoded_vocab,
-            prefix_pattern, complete_pattern, num_beams=1,
-        )
-        return result_tokens, value.rstrip(strip_chars)
-
-    result_tokens, value, _ = score_candidates(
-        model_instance, encoded, decoded_vocab,
-        prefix_pattern, complete_pattern,
-        forced_starts=[None, minus_id],
+    tokens_pos, value_pos, score_pos = score_candidates(
+        model_instance,
+        encoded,
+        decoded_vocab,
+        prefix_pattern,
+        complete_pattern,
+        num_beams=1,
+        stream=False,
     )
-    return result_tokens, value.rstrip(strip_chars)
+    value_pos = value_pos.rstrip(strip_chars)
+
+    minus_id = _get_minus_token(decoded_vocab, encoded, model_instance)
+    if minus_id is None:
+        return tokens_pos, value_pos
+
+    tokens_neg, value_neg, score_neg = score_candidates(
+        model_instance,
+        encoded + [minus_id],
+        decoded_vocab,
+        prefix_pattern,
+        complete_pattern,
+        num_beams=1,
+        stream=False,
+    )
+    value_neg = value_neg.rstrip(strip_chars)
+    if not value_neg.startswith("-"):
+        value_neg = "-" + value_neg
+
+    if score_neg > score_pos:
+        return tokens_neg, value_neg
+    return tokens_pos, value_pos
+
+
+def _ensure_float_dot(value: str) -> str:
+    """Ensure a number string has a decimal point so JSON parses it as float.
+
+    Scientific notation (e.g. '2e34') already implies float and is left
+    unchanged. Plain integers like '42' or '-7' become '42.0' and '-7.0'.
+
+    Args:
+        value: Raw number string (no terminal character).
+
+    Returns:
+        Number string guaranteed to contain '.' or 'e'/'E'.
+    """
+    if "." not in value and "e" not in value.lower():
+        value += ".0"
+    return value
 
 
 # ---------------------------------------------------------------------------
 # Public process_* helpers
 # ---------------------------------------------------------------------------
+
 
 def process_number(
     model_instance: Small_LLM_Model,
@@ -192,21 +237,33 @@ def process_number(
 ) -> tuple[list[int], str]:
     """Generate a number parameter.
 
-    fast=True : 1 beam → stream=True automatically, each token printed live.
-    fast=False: forced_starts=[None, minus_id] → 2 beams → stream=False,
-                best of positive and negative printed once at the end.
+    The returned value always contains a decimal point so it serialises as a
+    JSON float (e.g. '42' → '42.0').
+
+    fast=True : 1 beam, stream=auto (True) → each token printed live.
+    fast=False: two silent beams (positive vs forced negative), winner
+                printed once at the end.
     """
     if fast:
         result_tokens, value, _ = score_candidates(
-            model_instance, encoded, decoded_vocab,
-            _NUMBER_PREFIX, _NUMBER_COMPLETE, num_beams=1,
+            model_instance,
+            encoded,
+            decoded_vocab,
+            _NUMBER_PREFIX,
+            _NUMBER_COMPLETE,
+            num_beams=1,
         )
-        value = value.rstrip(",}")
+        value = _ensure_float_dot(value)
     else:
         result_tokens, value = _score_with_negative(
-            model_instance, encoded, decoded_vocab,
-            _NUMBER_PREFIX, _NUMBER_COMPLETE, strip_chars=",}",
+            model_instance,
+            encoded,
+            decoded_vocab,
+            _NUMBER_PREFIX,
+            _NUMBER_COMPLETE,
+            strip_chars=_TERMINAL_CHARS,
         )
+        value = _ensure_float_dot(value)
         print(value, end="", flush=True)
     return result_tokens, value
 
@@ -219,20 +276,27 @@ def process_integer(
 ) -> tuple[list[int], str]:
     """Generate an integer parameter.
 
-    fast=True : 1 beam → stream=True automatically, each token printed live.
-    fast=False: forced_starts=[None, minus_id] → 2 beams → stream=False,
-                best of positive and negative printed once at the end.
+    fast=True : 1 beam, stream=auto (True) → each token printed live.
+    fast=False: two silent beams (positive vs forced negative), winner
+                printed once at the end.
     """
     if fast:
         result_tokens, value, _ = score_candidates(
-            model_instance, encoded, decoded_vocab,
-            _INTEGER_PREFIX, _INTEGER_COMPLETE, num_beams=1,
+            model_instance,
+            encoded,
+            decoded_vocab,
+            _INTEGER_PREFIX,
+            _INTEGER_COMPLETE,
+            num_beams=1,
         )
-        value = value.rstrip(",}")
     else:
         result_tokens, value = _score_with_negative(
-            model_instance, encoded, decoded_vocab,
-            _INTEGER_PREFIX, _INTEGER_COMPLETE, strip_chars=",}",
+            model_instance,
+            encoded,
+            decoded_vocab,
+            _INTEGER_PREFIX,
+            _INTEGER_COMPLETE,
+            strip_chars=_TERMINAL_CHARS,
         )
         print(value, end="", flush=True)
     return result_tokens, value
@@ -246,24 +310,30 @@ def process_string(
 ) -> tuple[list[int], str]:
     """Generate a string parameter.
 
-    fast=True : 1 beam → stream=True, tokens printed live; only `"` printed
-                at the end by this function.
-    fast=False: 4 beams → stream=False, full value printed once at the end.
+    fast=True : 1 beam, stream=auto (True) → opening quote printed, then
+                each content token live, then closing quote.
+    fast=False: 4 beams, stream=auto (False since >1 beam) → nothing
+                printed during search, full value printed once at the end.
     """
     encoded_context: list[int] = model_instance.encode(context + '"')[0].tolist()
     print('"', end="", flush=True)
 
     result_tokens, value, _ = score_candidates(
-        model_instance, encoded_context, decoded_vocab,
-        _STRING_PREFIX, _STRING_COMPLETE,
+        model_instance,
+        encoded_context,
+        decoded_vocab,
+        _STRING_PREFIX,
+        _STRING_COMPLETE,
         num_beams=1 if fast else 4,
     )
     value = value.strip('"')
 
     if fast:
-        print('"', end="", flush=True)          # content already streamed
+        # Content already streamed token by token; only closing quote remains
+        print('"', end="", flush=True)
     else:
-        print(value + '"', end="", flush=True)  # print full value at once
+        # Nothing was printed during 4-beam search; print full value now
+        print(value + '"', end="", flush=True)
 
     return result_tokens, f'"{value}"'
 
@@ -276,13 +346,16 @@ def process_anything(
 ) -> tuple[list[int], str]:
     """Generate a parameter of unknown type.
 
-    Always uses 1 beam (stream=True); no multi-beam strategy for unknown types.
-    In thinking mode the single beam still streams — the distinction is only
-    meaningful for numbers and strings.
+    Always uses 1 beam → stream=auto (True). Both modes behave identically
+    since there is no multi-beam strategy for unknown types.
     """
     result_tokens, value, _ = score_candidates(
-        model_instance, encoded, decoded_vocab,
-        _ANYTHING_PREFIX, _ANYTHING_COMPLETE, num_beams=1,
+        model_instance,
+        encoded,
+        decoded_vocab,
+        _ANYTHING_PREFIX,
+        _ANYTHING_COMPLETE,
+        num_beams=1,
     )
-    value = value.rstrip(",}")
+    value = value.rstrip(_TERMINAL_CHARS)
     return result_tokens, value

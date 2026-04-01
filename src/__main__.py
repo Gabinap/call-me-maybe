@@ -90,11 +90,13 @@ def start_generation(args: Args, model: str) -> None:
             fast=fast,
         )
 
-        results.append({
-            "prompt": prompt,
-            "name": func_name,
-            "parameters": parameters,
-        })
+        results.append(
+            {
+                "prompt": prompt,
+                "name": func_name,
+                "parameters": parameters,
+            }
+        )
 
         # No trailing newline: next entry's leading `\n` (prompt_prefix) provides it.
         if i < len(args.prompts) - 1:
