@@ -1,7 +1,7 @@
 import re
-from dataclasses import dataclass
 
 import numpy as np
+from pydantic import BaseModel
 
 from llm_sdk import Small_LLM_Model
 
@@ -12,8 +12,8 @@ from llm_sdk import Small_LLM_Model
 _NUMBER_PREFIX = re.compile(r"^-?(\d+(\.\d*)?([eE][+-]?\d*)?)?$")
 _NUMBER_COMPLETE = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?[,}]$")
 
-_INTEGER_PREFIX = re.compile(r"^-?\d+?$")
-_INTEGER_COMPLETE = re.compile(r"^-?\d+?[,}]$")
+_INTEGER_PREFIX = re.compile(r"^(-?\d+|-)$")
+_INTEGER_COMPLETE = re.compile(r"^-?\d+[,}]$")
 
 _STRING_PREFIX = re.compile(r'^([^"\\]|\\.)*$')
 _STRING_COMPLETE = re.compile(r'^([^"\\]|\\.)*"$')
@@ -30,8 +30,7 @@ _TERMINAL_CHARS = ",} \n\r\t"
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class PrecomputedVocab:
+class PrecomputedVocab(BaseModel):
     """All per-pattern token lists derived from the vocabulary.
 
     Built once in ``__main__.py`` via :py:meth:`build` and passed through
@@ -152,15 +151,21 @@ def score_candidates(
     """Run beam search constrained by prefix/complete patterns.
 
     Optimisations applied here:
-    - ``valid_start_ids`` and ``fallback_ids`` are precomputed (no vocab scan).
+    - ``valid_start_ids`` and ``fallback_ids`` are precomputed (no vocab
+      scan).
     - ``_best_tokens_numpy`` uses numpy fancy indexing instead of Python
       ``heapq`` / ``max`` for token selection.
     - ``_step_cache`` caches per-``current_str`` valid token lists so that
-      beams sharing a prefix pay the regex cost only once per unique prefix.
+      beams sharing a prefix pay the regex cost only once per unique
+      prefix.
 
     Streaming behaviour:
     - ``stream=None`` (default): auto — stream iff exactly one beam runs.
     - ``stream=False``: always silent (used by ``_score_with_negative``).
+
+    The returned *value* has the terminal character removed (the last char
+    when ``complete_pattern`` matched) but is **not** stripped further.
+    Callers are responsible for any additional stripping they need.
 
     Args:
         model_instance: The language model instance.
@@ -175,8 +180,8 @@ def score_candidates(
         stream: Streaming override. ``None`` = auto, ``False`` = silent.
 
     Returns:
-        Tuple of (token sequence including terminal, value without terminal
-        character, average log-score of the winning beam).
+        Tuple of (token sequence including terminal, value without
+        terminal character, average log-score of the winning beam).
     """
     logits: list[float] = model_instance.get_logits_from_input_ids(
         encoded_context
@@ -185,7 +190,9 @@ def score_candidates(
         logits, valid_start_ids, num_beams
     )
 
-    do_stream: bool = (len(best_start_ids) == 1) if stream is None else stream
+    do_stream: bool = (
+        (len(best_start_ids) == 1) if stream is None else stream
+    )
 
     beams: list[tuple[list[int], str, list[float]]] = [
         (encoded_context + [t], pv.decoded[t], [logits[t]])
@@ -197,7 +204,7 @@ def score_candidates(
         if not complete_pattern.match(first_str):
             print(first_str, end="", flush=True)
 
-    # Optimisation 4: cache valid token IDs per unique current_str prefix.
+    # Cache valid token IDs per unique current_str prefix.
     # Beams that reach the same partial value share the cached result.
     _step_cache: dict[str, list[int]] = {}
 
@@ -227,7 +234,6 @@ def score_candidates(
             step_logits: list[float] = (
                 model_instance.get_logits_from_input_ids(current_tokens)
             )
-            # Optimisation 3: numpy argmax over valid subset
             best: int = _best_tokens_numpy(
                 step_logits, valid_token_ids, 1
             )[0]
@@ -248,10 +254,11 @@ def score_candidates(
             if complete_pattern.match(current_str)
             else current_str
         )
-        value = value.rstrip(_TERMINAL_CHARS)
         completed.append((current_tokens, value, avg_score))
 
-    best_tokens, best_value, best_score = max(completed, key=lambda x: x[2])
+    best_tokens, best_value, best_score = max(
+        completed, key=lambda x: x[2]
+    )
     return best_tokens, best_value, best_score
 
 
@@ -293,7 +300,7 @@ def _score_with_negative(
     fallback_ids: list[int],
     strip_chars: str,
 ) -> tuple[list[int], str]:
-    """Run a free beam and a forced-negative beam silently; return the best.
+    """Run a free beam and a forced-negative beam silently; pick best.
 
     Both beams use ``stream=False``. The '-' token is injected into the
     context of the negative beam (not scored) so both beams are compared
@@ -376,9 +383,9 @@ def process_number(
 ) -> tuple[list[int], str]:
     """Generate a number parameter.
 
-    The returned value always contains a decimal point (e.g. '42' → '42.0').
+    The returned value always contains a decimal point (e.g. '42' -> '42.0').
 
-    fast=True : 1 beam, stream=auto (True) → each token printed live.
+    fast=True : 1 beam, stream=auto (True) -> each token printed live.
     fast=False: two silent beams (positive vs forced negative), winner
                 printed once at the end.
     """
@@ -393,6 +400,7 @@ def process_number(
             pv.number_fallback,
             num_beams=1,
         )
+        value = value.rstrip(_TERMINAL_CHARS)
         value = _ensure_float_dot(value)
     else:
         result_tokens, value = _score_with_negative(
@@ -418,7 +426,7 @@ def process_integer(
 ) -> tuple[list[int], str]:
     """Generate an integer parameter.
 
-    fast=True : 1 beam, stream=auto (True) → each token printed live.
+    fast=True : 1 beam, stream=auto (True) -> each token printed live.
     fast=False: two silent beams (positive vs forced negative), winner
                 printed once at the end.
     """
@@ -433,6 +441,7 @@ def process_integer(
             pv.integer_fallback,
             num_beams=1,
         )
+        value = value.rstrip(_TERMINAL_CHARS)
     else:
         result_tokens, value = _score_with_negative(
             model_instance,
@@ -456,9 +465,9 @@ def process_string(
 ) -> tuple[list[int], str]:
     """Generate a string parameter.
 
-    fast=True : 1 beam, stream=auto (True) → opening quote, tokens live,
+    fast=True : 1 beam, stream=auto (True) -> opening quote, tokens live,
                 closing quote.
-    fast=False: 4 beams, stream=auto (False) → silent search, full value
+    fast=False: 4 beams, stream=auto (False) -> silent search, full value
                 printed once at the end.
     """
     encoded_context: list[int] = (
@@ -476,7 +485,11 @@ def process_string(
         pv.string_fallback,
         num_beams=1 if fast else 4,
     )
-    value = value.strip('"')
+    # Remove only outermost quotes (not str.strip which is greedy)
+    if value.startswith('"'):
+        value = value[1:]
+    if value.endswith('"'):
+        value = value[:-1]
 
     if fast:
         print('"', end="", flush=True)

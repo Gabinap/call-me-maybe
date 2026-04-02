@@ -12,12 +12,15 @@ def get_vocabulary(model_instance: Small_LLM_Model) -> dict[str, int]:
     """Load vocabulary from the model's vocabulary file.
 
     Args:
-        model_instance: The language model instance to extract vocabulary from.
+        model_instance: The language model instance to extract vocabulary
+                        from.
 
     Returns:
         A dictionary mapping token strings to their token IDs.
     """
-    with open(model_instance.get_path_to_vocab_file(), encoding="utf-8") as f:
+    with open(
+        model_instance.get_path_to_vocab_file(), encoding="utf-8"
+    ) as f:
         raw = json.load(f)
     if not isinstance(raw, dict):
         return {}
@@ -29,10 +32,11 @@ def get_vocabulary(model_instance: Small_LLM_Model) -> dict[str, int]:
 
 
 def write_output(results: list[dict[str, Any]], output_path: str) -> None:
-    """Write the results list to a JSON file, creating parent dirs if needed.
+    """Write the results list to a JSON file, creating parent dirs.
 
     Args:
-        results: List of result dicts, each with prompt/name/parameters keys.
+        results: List of result dicts, each with prompt/name/parameters
+                 keys.
         output_path: Destination file path.
     """
     import os
@@ -48,27 +52,27 @@ def write_output(results: list[dict[str, Any]], output_path: str) -> None:
         print(f"\nError: could not write output file — {e}", flush=True)
 
 
-def start_generation(args: Args, model: str) -> None:
+def start_generation(args: Args) -> None:
     """Generate function call completions for the given prompts.
 
     Optimisation 1: ``PrecomputedVocab.build`` scans the full vocabulary
     once and stores all per-pattern token ID lists. Every call to
-    ``score_candidates`` receives these precomputed lists directly, avoiding
-    O(vocab × regex) scans at generation time.
+    ``score_candidates`` receives these precomputed lists directly,
+    avoiding O(vocab x regex) scans at generation time.
 
-    Args:
-        args: Parsed arguments containing prompts, function definitions, mode.
-        model: The name/path of the language model to use.
+    Args:Go
+        args: Parsed arguments containing prompts, function definitions,
+              mode, and model name.
     """
     fast: bool = args.mode == "fast"
 
-    model_instance = Small_LLM_Model(model_name=model)
+    model_instance = Small_LLM_Model(model_name=args.model)
 
     vocab: dict[str, int] = get_vocabulary(model_instance)
     reverse_vocab: dict[int, str] = {v: k for k, v in vocab.items()}
 
-    # Decode every token once; pass the result everywhere instead of calling
-    # model_instance.decode() repeatedly at generation time.
+    # Decode every token once; pass the result everywhere instead of
+    # calling model_instance.decode() repeatedly at generation time.
     decoded_vocab: dict[int, str] = {
         t: model_instance.decode([t]) for t in reverse_vocab
     }
@@ -95,7 +99,9 @@ def start_generation(args: Args, model: str) -> None:
             pv,
         )
         encoded = encoded[len(encoded_func_names):]
-        function_def = next(f for f in args.functions if f.name == func_name)
+        function_def = next(
+            f for f in args.functions if f.name == func_name
+        )
 
         parameters: dict[str, Any] = get_function_parameters(
             reverse_vocab,
@@ -124,13 +130,9 @@ def start_generation(args: Args, model: str) -> None:
     write_output(results, args.output)
 
 
-def main(model: str = "Qwen/Qwen3-0.6B") -> None:
-    """Main entry point for the function calling generation task.
-
-    Args:
-        model: The language model to use (default: Qwen/Qwen3-0.6B).
-    """
-    start_generation(parse(), model)
+def main() -> None:
+    """Main entry point for the function calling generation task."""
+    start_generation(parse())
 
 
 if __name__ == "__main__":

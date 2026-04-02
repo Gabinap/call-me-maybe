@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-from src.parsing import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.parsing import (  # noqa: E402
     Args,
     FunctionDef,
     _validate_param_schema,
@@ -19,8 +21,6 @@ from src.parsing import (
     parse,
     prompt_parsing,
 )
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,10 @@ def _valid_func_data(**kwargs: Any) -> dict[str, Any]:
     base = {
         "name": "fn_add",
         "description": "Add two numbers.",
-        "parameters": {"a": {"type": "number"}, "b": {"type": "number"}},
+        "parameters": {
+            "a": {"type": "number"},
+            "b": {"type": "number"},
+        },
         "returns": {"type": "number"},
     }
     base.update(kwargs)
@@ -149,6 +152,14 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(args.input, "my/input.json")
         self.assertEqual(args.output, "my/output.json")
 
+    def test_default_model(self) -> None:
+        args = Args()
+        self.assertEqual(args.model, "Qwen/Qwen3-0.6B")
+
+    def test_custom_model(self) -> None:
+        args = Args(model="meta-llama/Llama-3-8B")
+        self.assertEqual(args.model, "meta-llama/Llama-3-8B")
+
 
 # ---------------------------------------------------------------------------
 # _validate_param_schema
@@ -157,19 +168,29 @@ class TestArgs(unittest.TestCase):
 
 class TestValidateParamSchema(unittest.TestCase):
     def test_valid_string(self) -> None:
-        self.assertTrue(_validate_param_schema({"type": "string"}, "p"))
+        self.assertTrue(
+            _validate_param_schema({"type": "string"}, "p")
+        )
 
     def test_valid_number(self) -> None:
-        self.assertTrue(_validate_param_schema({"type": "number"}, "p"))
+        self.assertTrue(
+            _validate_param_schema({"type": "number"}, "p")
+        )
 
     def test_valid_integer(self) -> None:
-        self.assertTrue(_validate_param_schema({"type": "integer"}, "p"))
+        self.assertTrue(
+            _validate_param_schema({"type": "integer"}, "p")
+        )
 
     def test_valid_boolean(self) -> None:
-        self.assertTrue(_validate_param_schema({"type": "boolean"}, "p"))
+        self.assertTrue(
+            _validate_param_schema({"type": "boolean"}, "p")
+        )
 
     def test_valid_array(self) -> None:
-        self.assertTrue(_validate_param_schema({"type": "array"}, "p"))
+        self.assertTrue(
+            _validate_param_schema({"type": "array"}, "p")
+        )
 
     def test_valid_flat_object(self) -> None:
         schema = {
@@ -202,17 +223,23 @@ class TestValidateParamSchema(unittest.TestCase):
         self.assertFalse(_validate_param_schema(None, "p"))
 
     def test_invalid_unknown_type(self) -> None:
-        self.assertFalse(_validate_param_schema({"type": "uuid"}, "p"))
+        self.assertFalse(
+            _validate_param_schema({"type": "uuid"}, "p")
+        )
 
     def test_invalid_missing_type(self) -> None:
         self.assertFalse(_validate_param_schema({}, "p"))
 
     def test_object_missing_properties(self) -> None:
-        self.assertFalse(_validate_param_schema({"type": "object"}, "p"))
+        self.assertFalse(
+            _validate_param_schema({"type": "object"}, "p")
+        )
 
     def test_object_empty_properties(self) -> None:
         self.assertFalse(
-            _validate_param_schema({"type": "object", "properties": {}}, "p")
+            _validate_param_schema(
+                {"type": "object", "properties": {}}, "p"
+            )
         )
 
     def test_object_properties_not_dict(self) -> None:
@@ -242,7 +269,9 @@ class TestValidateParameters(unittest.TestCase):
         self.assertIsNone(_validate_parameters(None, "fn"))
 
     def test_not_a_dict_returns_none(self) -> None:
-        self.assertIsNone(_validate_parameters("bad", "fn"))  # type: ignore
+        self.assertIsNone(
+            _validate_parameters("bad", "fn")  # type: ignore
+        )
 
     def test_valid_flat_params(self) -> None:
         params = {"a": {"type": "number"}, "b": {"type": "string"}}
@@ -305,7 +334,9 @@ class TestPromptParsing(unittest.TestCase):
             os.unlink(path)
 
     def test_file_not_found(self) -> None:
-        self.assertEqual(prompt_parsing("does_not_exist_xyz.json"), [])
+        self.assertEqual(
+            prompt_parsing("does_not_exist_xyz.json"), []
+        )
 
     def test_invalid_json(self) -> None:
         with tempfile.NamedTemporaryFile(
@@ -326,7 +357,9 @@ class TestPromptParsing(unittest.TestCase):
             os.unlink(path)
 
     def test_skips_prompt_too_long(self) -> None:
-        path = _write_json([{"prompt": "x" * 301}, {"prompt": "short"}])
+        path = _write_json(
+            [{"prompt": "x" * 301}, {"prompt": "short"}]
+        )
         try:
             self.assertEqual(prompt_parsing(path), ["short"])
         finally:
@@ -415,7 +448,9 @@ class TestFunctionsDefParsing(unittest.TestCase):
             os.unlink(path)
 
     def test_file_not_found(self) -> None:
-        self.assertEqual(functions_def_parsing("no_such_file_xyz.json"), [])
+        self.assertEqual(
+            functions_def_parsing("no_such_file_xyz.json"), []
+        )
 
     def test_invalid_json(self) -> None:
         with tempfile.NamedTemporaryFile(
@@ -437,7 +472,13 @@ class TestFunctionsDefParsing(unittest.TestCase):
 
     def test_skips_missing_returns_key(self) -> None:
         path = _write_json(
-            [{"name": "fn_a", "description": "A.", "parameters": None}]
+            [
+                {
+                    "name": "fn_a",
+                    "description": "A.",
+                    "parameters": None,
+                }
+            ]
         )
         try:
             self.assertEqual(functions_def_parsing(path), [])
@@ -494,19 +535,39 @@ class TestCommandParsing(unittest.TestCase):
 
     def test_custom_input(self) -> None:
         with patch("sys.argv", ["prog", "--input", "my/input.json"]):
-            self.assertEqual(command_parsing()["input"], "my/input.json")
+            self.assertEqual(
+                command_parsing()["input"], "my/input.json"
+            )
 
     def test_custom_output(self) -> None:
-        with patch("sys.argv", ["prog", "--output", "my/output.json"]):
-            self.assertEqual(command_parsing()["output"], "my/output.json")
+        with patch(
+            "sys.argv", ["prog", "--output", "my/output.json"]
+        ):
+            self.assertEqual(
+                command_parsing()["output"], "my/output.json"
+            )
 
     def test_custom_functions_definition(self) -> None:
         with patch(
-            "sys.argv", ["prog", "--functions_definition", "my/funcs.json"]
+            "sys.argv",
+            ["prog", "--functions_definition", "my/funcs.json"],
         ):
             self.assertEqual(
-                command_parsing()["functions_definition"], "my/funcs.json"
+                command_parsing()["functions_definition"],
+                "my/funcs.json",
             )
+
+    def test_default_model(self) -> None:
+        with patch("sys.argv", ["prog"]):
+            result = command_parsing()
+        self.assertEqual(result["model"], "Qwen/Qwen3-0.6B")
+
+    def test_custom_model(self) -> None:
+        with patch(
+            "sys.argv", ["prog", "--model", "gpt2"]
+        ):
+            result = command_parsing()
+        self.assertEqual(result["model"], "gpt2")
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +595,7 @@ class TestParse(unittest.TestCase):
                 result = parse()
             self.assertIsInstance(result, Args)
             self.assertEqual(result.mode, "fast")
+            self.assertEqual(result.model, "Qwen/Qwen3-0.6B")
             self.assertEqual(result.prompts, ["hello"])
             self.assertEqual(len(result.functions), 1)
         finally:
@@ -562,7 +624,9 @@ class TestParse(unittest.TestCase):
             os.unlink(prompts_path)
             os.unlink(funcs_path)
 
-    def test_parse_with_missing_files_returns_empty_lists(self) -> None:
+    def test_parse_with_missing_files_returns_empty_lists(
+        self,
+    ) -> None:
         with patch(
             "sys.argv",
             [

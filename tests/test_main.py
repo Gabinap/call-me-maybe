@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-# Import the two pure utility functions we can test without running the LLM
-from src.__main__ import get_vocabulary, write_output
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.__main__ import get_vocabulary, write_output  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -123,17 +122,23 @@ class TestWriteOutput(unittest.TestCase):
                 self.assertEqual(json.load(f), [])
 
     def test_preserves_float_type(self) -> None:
-        results = [{"prompt": "p", "name": "fn", "parameters": {"a": 2.5}}]
+        results = [
+            {"prompt": "p", "name": "fn", "parameters": {"a": 2.5}}
+        ]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
             with patch("builtins.print"):
                 write_output(results, path)
             with open(path, encoding="utf-8") as f:
                 loaded = json.load(f)
-            self.assertIsInstance(loaded[0]["parameters"]["a"], float)
+            self.assertIsInstance(
+                loaded[0]["parameters"]["a"], float
+            )
 
     def test_preserves_int_type(self) -> None:
-        results = [{"prompt": "p", "name": "fn", "parameters": {"n": 3}}]
+        results = [
+            {"prompt": "p", "name": "fn", "parameters": {"n": 3}}
+        ]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
             with patch("builtins.print"):
@@ -143,7 +148,13 @@ class TestWriteOutput(unittest.TestCase):
             self.assertIsInstance(loaded[0]["parameters"]["n"], int)
 
     def test_preserves_string_type(self) -> None:
-        results = [{"prompt": "p", "name": "fn", "parameters": {"s": "hello"}}]
+        results = [
+            {
+                "prompt": "p",
+                "name": "fn",
+                "parameters": {"s": "hello"},
+            }
+        ]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
             with patch("builtins.print"):
@@ -175,18 +186,18 @@ class TestWriteOutput(unittest.TestCase):
             patch("os.makedirs"),
             patch("builtins.print"),
         ):
-            # Must not propagate the exception
             write_output([], "/fake/path/output.json")
 
     def test_output_is_indented_json(self) -> None:
-        results = [{"prompt": "p", "name": "fn", "parameters": {}}]
+        results = [
+            {"prompt": "p", "name": "fn", "parameters": {}}
+        ]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
             with patch("builtins.print"):
                 write_output(results, path)
             with open(path, encoding="utf-8") as f:
                 raw = f.read()
-            # json.dump with indent=2 produces multi-line output
             self.assertIn("\n", raw)
 
     def test_multiple_entries_all_written(self) -> None:

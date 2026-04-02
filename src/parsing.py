@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class FunctionDef(BaseModel):
+    """Schema for a single callable function definition."""
+
     name: str
     description: str
     parameters: dict[str, Any] | None
@@ -27,6 +29,8 @@ class FunctionDef(BaseModel):
 
 
 class Args(BaseModel):
+    """Validated CLI arguments and loaded input data."""
+
     functions_definition: str = Field(
         default="data/input/functions_definition.json",
         description="Functions definition file.",
@@ -46,6 +50,10 @@ class Args(BaseModel):
             "thinking: positive+negative beams for numbers/integers, "
             "4 beams for strings."
         ),
+    )
+    model: str = Field(
+        default="Qwen/Qwen3-0.6B",
+        description="HuggingFace model name or path.",
     )
     prompts: list[str] = Field(
         default_factory=list,
@@ -73,7 +81,7 @@ def _validate_param_schema(schema: Any, path: str = "") -> bool:
 
     Args:
         schema: The parameter schema value to validate (should be a dict).
-        path: Dotted path string for error messages (e.g. ``"user.address"``).
+        path: Dotted path string for error messages.
 
     Returns:
         True if valid, False otherwise (with a warning printed).
@@ -101,7 +109,7 @@ def _validate_param_schema(schema: Any, path: str = "") -> bool:
         for prop_name, prop_schema in properties.items():
             if not _validate_param_schema(
                 prop_schema, path=f"{path}.{prop_name}"
-                    ):
+            ):
                 return False
 
     return True
@@ -112,21 +120,24 @@ def _validate_parameters(
 ) -> dict[str, Any] | None:
     """Validate all parameter schemas for a function definition.
 
-    Invalid parameters are removed with a warning rather than rejecting the
-    whole function definition.
+    Invalid parameters are removed with a warning rather than rejecting
+    the whole function definition.
 
     Args:
         parameters: Raw parameters dict from the JSON input.
         func_name: Function name used in warning messages.
 
     Returns:
-        Filtered parameters dict with only valid entries, or None if empty.
+        Filtered parameters dict with only valid entries, or None if
+        empty.
     """
     if parameters is None:
         return None
     if not isinstance(parameters, dict):
-        print(f"Warning: 'parameters' for '{func_name}' \
-              must be an object — ignored")
+        print(
+            f"Warning: 'parameters' for '{func_name}' "
+            "must be an object — ignored"
+        )
         return None
 
     valid: dict[str, Any] = {}
@@ -137,8 +148,8 @@ def _validate_parameters(
             valid[param_name] = param_schema
         else:
             print(
-                f"Warning: dropping invalid parameter '{param_name}' \
-                    from '{func_name}'"
+                f"Warning: dropping invalid parameter "
+                f"'{param_name}' from '{func_name}'"
             )
 
     return valid if valid else None
@@ -183,13 +194,19 @@ def functions_def_parsing(f_d_file: str) -> list[FunctionDef]:
         try:
             returns_field = item["returns"]
             if not isinstance(returns_field, dict):
-                print("Skipping invalid function: 'returns' must be an object")
+                print(
+                    "Skipping invalid function: "
+                    "'returns' must be an object"
+                )
                 continue
             returns_type = returns_field.get("type")
-            if not isinstance(returns_type, str) or not returns_type.strip():
+            if (
+                not isinstance(returns_type, str)
+                or not returns_type.strip()
+            ):
                 print(
-                    "Skipping invalid function: 'returns.type' must be a"
-                    " non-empty string"
+                    "Skipping invalid function: 'returns.type' must be"
+                    " a non-empty string"
                 )
                 continue
 
@@ -257,8 +274,8 @@ def command_parsing() -> dict[str, Any]:
         Dictionary of provided argument names to their values.
     """
     parser = argparse.ArgumentParser(
-        description="Translate natural language prompts into structured \
-            function calls."
+        description="Translate natural language prompts into structured "
+        "function calls."
     )
     parser.add_argument(
         "--functions_definition",
@@ -289,14 +306,21 @@ def command_parsing() -> dict[str, Any]:
             "4 beams for strings."
         ),
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-0.6B",
+        help="HuggingFace model name or path (default: Qwen/Qwen3-0.6B).",
+    )
 
-    return {k: v for k, v in vars(parser.parse_args()).items()
-            if v is not None}
+    return {
+        k: v for k, v in vars(parser.parse_args()).items()
+        if v is not None
+    }
 
 
 def parse() -> Args:
-    """Parse all CLI arguments and input files;
-    return a validated Args instance.
+    """Parse all CLI arguments and input files.
 
     Returns:
         Fully populated Args instance.

@@ -35,7 +35,12 @@ def _cast(value: str, param_type: str | None) -> Any:
         if param_type == "integer":
             return int(value)
         if param_type == "boolean":
-            return value.lower() == "true"
+            lower = value.lower().strip()
+            if lower == "true":
+                return True
+            if lower == "false":
+                return False
+            return value
         if param_type == "string":
             if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
                 return value[1:-1]
@@ -64,9 +69,9 @@ def _generate_object(
     based on the property's type. If the type is ``"object"``, this
     function calls itself recursively with the nested ``properties``.
 
-    The opening ``{`` is printed before the first property; the closing ``}``
-    is printed after the last one. Each property is printed on its own line
-    indented by ``indent``.
+    The opening ``{`` is printed before the first property; the closing
+    ``}`` is printed after the last one. Each property is printed on its
+    own line indented by ``indent``.
 
     Args:
         model_instance: The language model instance.
@@ -80,7 +85,8 @@ def _generate_object(
         indent: Indentation string for pretty-printing nested levels.
 
     Returns:
-        Tuple of (updated token sequence, dict of generated property values).
+        Tuple of (updated token sequence, dict of generated property
+        values).
     """
     print("{", end="", flush=True)
     encoded.extend(model_instance.encode("{")[0].tolist())
@@ -96,7 +102,9 @@ def _generate_object(
         context_parts.append(f"{prop_name}: ")
 
         if prop_type == "object":
-            sub_properties: dict[str, Any] = prop_dict.get("properties", {})
+            sub_properties: dict[str, Any] = prop_dict.get(
+                "properties", {}
+            )
             encoded, nested_value = _generate_object(
                 model_instance,
                 encoded,
@@ -110,13 +118,15 @@ def _generate_object(
             printable = json.dumps(nested_value)
 
         elif prop_type == "number":
-            encoded, printable = process_number(model_instance, encoded, pv,
-                                                fast=fast)
+            encoded, printable = process_number(
+                model_instance, encoded, pv, fast=fast
+            )
             result[prop_name] = _cast(printable, "number")
 
         elif prop_type == "integer":
-            encoded, printable = process_integer(model_instance, encoded,
-                                                 pv, fast=fast)
+            encoded, printable = process_integer(
+                model_instance, encoded, pv, fast=fast
+            )
             result[prop_name] = _cast(printable, "integer")
 
         elif prop_type == "string":
@@ -136,7 +146,9 @@ def _generate_object(
         if prop_name != prop_names[-1]:
             print(",", end="", flush=True)
             if prop_type not in ("number", "integer"):
-                encoded.extend(model_instance.encode(",")[0].tolist())
+                encoded.extend(
+                    model_instance.encode(",")[0].tolist()
+                )
 
     closing = f"\n{indent[:-2]}}}"
     print(closing, end="", flush=True)
@@ -160,62 +172,74 @@ def get_valid_function_name(
     """Generate and validate a function name using the language model.
 
     Optimisations applied:
-    - ``valid_next`` set: token membership check is O(1) per token instead
-      of O(functions) with repeated ``startswith`` calls.
+    - ``valid_next`` set: token membership check is O(1) per token
+      instead of O(functions) with repeated ``startswith`` calls.
     - ``pv.decoded`` lookup replaces ``model_instance.decode([id])``.
 
     Args:
         reverse_vocab: Mapping from token IDs to raw BPE strings.
         model_instance: The language model instance for generating logits.
-        functions: List of available function definitions to validate against.
+        functions: List of available function definitions to validate
+                   against.
         prompt: The original natural language prompt.
-        encoded_func_names: Pre-encoded token IDs for function name context.
+        encoded_func_names: Pre-encoded token IDs for function name
+                            context.
         pv: Precomputed vocabulary data.
 
     Returns:
         Tuple of (updated token sequence, selected function name).
     """
-    prompt_prefix = f'\n  {{\n    "prompt": "{prompt}",\n    "name": "'
+    prompt_prefix = (
+        f'\n  {{\n    "prompt": "{prompt}",\n    "name": "'
+    )
     print(prompt_prefix, end="", flush=True)
     encoded: list[int] = (
-        encoded_func_names + model_instance.encode(prompt_prefix)[0].tolist()
+        encoded_func_names
+        + model_instance.encode(prompt_prefix)[0].tolist()
     )
     valid_function_names: list[str] = [f.name for f in functions]
     decoded_tokens: list[str] = [""]
     clean_name = ""
 
     while '"' not in decoded_tokens[-1]:
-        logits: list[float] = model_instance.get_logits_from_input_ids(encoded)
+        logits: list[float] = model_instance.get_logits_from_input_ids(
+            encoded
+        )
         clean_name = "".join(decoded_tokens).split('"')[0]
 
         matching: list[str] = [
-            n for n in valid_function_names if n.startswith(clean_name)
+            n for n in valid_function_names
+            if n.startswith(clean_name)
         ]
         if len(matching) == 1:
             remaining: str = matching[0][len(clean_name):]
-            encoded.extend(model_instance.encode(remaining)[0].tolist())
+            encoded.extend(
+                model_instance.encode(remaining)[0].tolist()
+            )
             print(remaining, end="", flush=True)
             clean_name = matching[0]
             break
 
-        # Build set of valid next-token decoded strings — O(1) membership check
+        # Build set of valid next-token decoded strings
         valid_next: set[str] = {
             pv.decoded[t]
             for t in reverse_vocab
             if any(
-                n.startswith(
-                    clean_name + pv.decoded[t]
-                    ) for n in valid_function_names
+                n.startswith(clean_name + pv.decoded[t])
+                for n in valid_function_names
             )
         }
         valid_token_ids: list[int] = [
-            t for t in reverse_vocab if pv.decoded.get(t, "") in valid_next
+            t for t in reverse_vocab
+            if pv.decoded.get(t, "") in valid_next
         ]
 
         if not valid_token_ids:
             break
 
-        best_token_id: int = max(valid_token_ids, key=lambda t: logits[t])
+        best_token_id: int = max(
+            valid_token_ids, key=lambda t: logits[t]
+        )
         next_token_str: str = pv.decoded[best_token_id]
         decoded_tokens.append(next_token_str)
         encoded.append(best_token_id)
@@ -252,15 +276,17 @@ def get_function_parameters(
         function_def: The function definition containing parameter specs.
         prompt: The original natural language prompt.
         pv: Precomputed vocabulary data passed to process_* functions.
-        fast: If True, stream each token immediately (1 beam). If False, use
-              multi-beam strategies for numbers/integers and strings.
+        fast: If True, stream each token immediately (1 beam). If False,
+              use multi-beam strategies for numbers/integers and strings.
 
     Returns:
         Dictionary mapping parameter names to their typed Python values.
     """
     parameters_prefix = '\n    "parameters": {'
     print(parameters_prefix, end="", flush=True)
-    encoded.extend(model_instance.encode(parameters_prefix)[0].tolist())
+    encoded.extend(
+        model_instance.encode(parameters_prefix)[0].tolist()
+    )
 
     params: dict[str, Any] | None = (
         function_def.parameters if function_def
@@ -271,9 +297,7 @@ def get_function_parameters(
         return {}
 
     context_parts: list[str] = [
-        f'User prompt: "{prompt}"\n',
-        f"Function description: {function_def.description}\n",
-        f"Function name: {function_def.name}\n",
+        f'"{prompt}"\n',
         f"Parameters: {', '.join(params.keys())}\n",
     ]
 
@@ -285,11 +309,14 @@ def get_function_parameters(
         param_type: str | None = param_dict.get("type")
         param_prefix: str = f'\n      "{param_name}": '
         print(param_prefix, end="", flush=True)
-        encoded.extend(model_instance.encode(param_prefix)[0].tolist())
+        encoded.extend(
+            model_instance.encode(param_prefix)[0].tolist()
+        )
 
         if param_type == "object":
-            # Recursively generate nested object; indent starts at 8 spaces
-            sub_properties: dict[str, Any] = param_dict.get("properties", {})
+            sub_properties: dict[str, Any] = param_dict.get(
+                "properties", {}
+            )
             encoded, obj_value = _generate_object(
                 model_instance,
                 encoded,
@@ -303,13 +330,15 @@ def get_function_parameters(
             printable = json.dumps(obj_value)
 
         elif param_type == "number":
-            encoded, printable = process_number(model_instance, encoded,
-                                                pv, fast=fast)
+            encoded, printable = process_number(
+                model_instance, encoded, pv, fast=fast
+            )
             result[param_name] = _cast(printable, "number")
 
         elif param_type == "integer":
-            encoded, printable = process_integer(model_instance, encoded,
-                                                 pv, fast=fast)
+            encoded, printable = process_integer(
+                model_instance, encoded, pv, fast=fast
+            )
             result[param_name] = _cast(printable, "integer")
 
         elif param_type == "string":
@@ -322,14 +351,16 @@ def get_function_parameters(
             encoded, printable = process_anything(
                 model_instance, encoded, pv, fast=fast
             )
-            result[param_name] = _cast(printable, param_type)
+            result[param_name] = _cast(printable, None)
 
         context_parts.append(f"{printable}\n")
 
         if param_name != param_names[-1]:
             print(",", end="", flush=True)
-            if param_type not in ("number", "integer", "object"):
-                encoded.extend(model_instance.encode(",")[0].tolist())
+            if param_type not in ("number", "integer"):
+                encoded.extend(
+                    model_instance.encode(",")[0].tolist()
+                )
 
     print("\n    }", end="", flush=True)
     return result

@@ -6,16 +6,16 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from src.get_from_llm import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.get_from_llm import (  # noqa: E402
     _cast,
     _generate_object,
     get_function_parameters,
     get_valid_function_name,
 )
-from src.parsing import FunctionDef
-from src.process import PrecomputedVocab
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.parsing import FunctionDef  # noqa: E402
+from src.process import PrecomputedVocab  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +100,11 @@ class TestCast(unittest.TestCase):
 
     def test_boolean_false(self) -> None:
         self.assertIs(_cast("false", "boolean"), False)
+        self.assertIs(_cast("False", "boolean"), False)
+
+    def test_boolean_invalid_returns_raw(self) -> None:
+        self.assertEqual(_cast("maybe", "boolean"), "maybe")
+        self.assertEqual(_cast("1", "boolean"), "1")
 
     def test_string_strips_quotes(self) -> None:
         self.assertEqual(_cast('"hello"', "string"), "hello")
@@ -124,7 +129,10 @@ class TestCast(unittest.TestCase):
 
 class TestGenerateObject(unittest.TestCase):
     def test_flat_object_returns_dict(self) -> None:
-        properties = {"name": {"type": "string"}, "age": {"type": "integer"}}
+        properties = {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+        }
         model = _base_model()
         pv = _small_pv()
 
@@ -138,7 +146,8 @@ class TestGenerateObject(unittest.TestCase):
                 ),
             ),
             patch(
-                "src.get_from_llm.process_integer", return_value=([0], "30")
+                "src.get_from_llm.process_integer",
+                return_value=([0], "30"),
             ),
         ):
             encoded, result = _generate_object(
@@ -198,7 +207,8 @@ class TestGenerateObject(unittest.TestCase):
         with (
             patch("builtins.print"),
             patch(
-                "src.get_from_llm.process_number", return_value=([0], "9.5")
+                "src.get_from_llm.process_number",
+                return_value=([0], "9.5"),
             ),
         ):
             encoded, result = _generate_object(
@@ -236,7 +246,10 @@ class TestGenerateObject(unittest.TestCase):
 
         with (
             patch("builtins.print") as mock_print,
-            patch("src.get_from_llm.process_integer", return_value=([0], "1")),
+            patch(
+                "src.get_from_llm.process_integer",
+                return_value=([0], "1"),
+            ),
         ):
             _generate_object(
                 model,
@@ -248,7 +261,9 @@ class TestGenerateObject(unittest.TestCase):
             )
 
         printed = "".join(
-            str(c.args[0]) for c in mock_print.call_args_list if c.args
+            str(c.args[0])
+            for c in mock_print.call_args_list
+            if c.args
         )
         self.assertIn("{", printed)
         self.assertIn("}", printed)
@@ -266,7 +281,10 @@ class TestGenerateObject(unittest.TestCase):
 
         with (
             patch("builtins.print") as mock_print,
-            patch("src.get_from_llm.process_integer", return_value=([0], "1")),
+            patch(
+                "src.get_from_llm.process_integer",
+                return_value=([0], "1"),
+            ),
         ):
             _generate_object(
                 model,
@@ -278,7 +296,6 @@ class TestGenerateObject(unittest.TestCase):
                 indent="      ",
             )
 
-        # Deeper indent (8+ spaces) should appear for the nested property
         self.assertTrue(
             any(
                 "        " in str(c.args[0])
@@ -309,7 +326,12 @@ class TestGetValidFunctionName(unittest.TestCase):
 
         with patch("builtins.print"):
             tokens, name = get_valid_function_name(
-                reverse_vocab, model, self._functions(), "prompt", [], pv
+                reverse_vocab,
+                model,
+                self._functions(),
+                "prompt",
+                [],
+                pv,
             )
 
         self.assertIsInstance(tokens, list)
@@ -362,7 +384,12 @@ class TestGetValidFunctionName(unittest.TestCase):
 
         with patch("builtins.print"):
             tokens, name = get_valid_function_name(
-                reverse_vocab, model, self._functions(), "prompt", [], pv
+                reverse_vocab,
+                model,
+                self._functions(),
+                "prompt",
+                [],
+                pv,
             )
 
         self.assertIn(6, tokens)
@@ -405,7 +432,10 @@ class TestGetFunctionParameters(unittest.TestCase):
         pv = _small_pv()
         with (
             patch("builtins.print"),
-            patch("src.get_from_llm.process_integer", return_value=([0], "7")),
+            patch(
+                "src.get_from_llm.process_integer",
+                return_value=([0], "7"),
+            ),
         ):
             result = get_function_parameters(
                 {}, _base_model(), [], fd, "prompt", pv, fast=True
@@ -462,18 +492,18 @@ class TestGetFunctionParameters(unittest.TestCase):
         pv = _small_pv()
         with (
             patch("builtins.print"),
-                patch(
-                    "src.get_from_llm.process_number",
-                    return_value=([0], "1.5"),
-                ),
-                patch(
-                    "src.get_from_llm.process_integer",
-                    return_value=([0], "2"),
-                ),
-                patch(
-                    "src.get_from_llm.process_string",
-                    return_value=([0], '"lbl"'),
-                ),
+            patch(
+                "src.get_from_llm.process_number",
+                return_value=([0], "1.5"),
+            ),
+            patch(
+                "src.get_from_llm.process_integer",
+                return_value=([0], "2"),
+            ),
+            patch(
+                "src.get_from_llm.process_string",
+                return_value=([0], '"lbl"'),
+            ),
         ):
             result = get_function_parameters(
                 {}, _base_model(), [], fd, "prompt", pv, fast=True
@@ -489,7 +519,8 @@ class TestGetFunctionParameters(unittest.TestCase):
         with (
             patch("builtins.print"),
             patch(
-                "src.get_from_llm.process_number", return_value=([0], "3.0")
+                "src.get_from_llm.process_number",
+                return_value=([0], "3.0"),
             ) as mock_num,
         ):
             get_function_parameters(
@@ -504,7 +535,8 @@ class TestGetFunctionParameters(unittest.TestCase):
         with (
             patch("builtins.print"),
             patch(
-                "src.get_from_llm.process_number", return_value=([0], "3.0")
+                "src.get_from_llm.process_number",
+                return_value=([0], "3.0"),
             ) as mock_num,
         ):
             get_function_parameters(
