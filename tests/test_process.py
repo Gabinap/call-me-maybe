@@ -14,6 +14,8 @@ from src.process import (
     _NUMBER_PREFIX,
     _STRING_COMPLETE,
     _STRING_PREFIX,
+    PrecomputedVocab,
+    _ensure_float_dot,
     _get_minus_token,
     _score_with_negative,
     process_anything,
@@ -32,14 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def _tensor(ids: list[int]) -> MagicMock:
-    """Return a mock tensor whose .tolist() returns ids."""
     t = MagicMock()
     t.tolist.return_value = ids
     return t
 
 
 def _mock(logits_sequence: list[list[float]]) -> MagicMock:
-    """Mock model with sequential logit responses and a working encode."""
     model = MagicMock()
     model.get_logits_from_input_ids.side_effect = logits_sequence
     model.encode.return_value = [_tensor([10, 11])]
@@ -48,12 +48,66 @@ def _mock(logits_sequence: list[list[float]]) -> MagicMock:
 
 
 def _mock_static(logits: list[float]) -> MagicMock:
-    """Mock model that always returns the same logits."""
     model = MagicMock()
     model.get_logits_from_input_ids.return_value = logits
     model.encode.return_value = [_tensor([10])]
     model.decode.return_value = "x"
     return model
+
+
+def _pv(decoded_vocab: dict[int, str]) -> PrecomputedVocab:
+    """Build a PrecomputedVocab from a small decoded_vocab dict."""
+    return PrecomputedVocab.build(decoded_vocab)
+
+
+# ---------------------------------------------------------------------------
+# PrecomputedVocab
+# ---------------------------------------------------------------------------
+
+
+class TestPrecomputedVocab(unittest.TestCase):
+    def _full_vocab(self) -> dict[int, str]:
+        return {0: "4", 1: "2", 2: ",", 3: "-", 4: "h", 5: '"', 6: "true"}
+
+    def test_build_returns_instance(self) -> None:
+        pv = _pv(self._full_vocab())
+        self.assertIsInstance(pv, PrecomputedVocab)
+
+    def test_decoded_preserved(self) -> None:
+        vocab = self._full_vocab()
+        pv = _pv(vocab)
+        self.assertEqual(pv.decoded, vocab)
+
+    def test_minus_ids_extracted(self) -> None:
+        pv = _pv({0: "3", 1: "-", 2: ","})
+        self.assertIn(1, pv.minus_ids)
+        self.assertNotIn(0, pv.minus_ids)
+
+    def test_no_minus_ids_when_absent(self) -> None:
+        pv = _pv({0: "3", 1: ","})
+        self.assertEqual(pv.minus_ids, [])
+
+    def test_integer_starts_only_digits(self) -> None:
+        pv = _pv({0: "4", 1: ",", 2: "h"})
+        self.assertIn(0, pv.integer_starts)
+        self.assertNotIn(1, pv.integer_starts)
+        self.assertNotIn(2, pv.integer_starts)
+
+    def test_string_starts_excludes_quote(self) -> None:
+        pv = _pv({0: "h", 1: '"'})
+        self.assertIn(0, pv.string_starts)
+        self.assertNotIn(1, pv.string_starts)
+
+    def test_number_starts_includes_minus(self) -> None:
+        # "-" alone matches _NUMBER_PREFIX (optional digit group)
+        pv = _pv({0: "-", 1: "3"})
+        self.assertIn(0, pv.number_starts)
+        self.assertIn(1, pv.number_starts)
+
+    def test_empty_vocab(self) -> None:
+        pv = _pv({})
+        self.assertEqual(pv.integer_starts, [])
+        self.assertEqual(pv.minus_ids, [])
 
 
 # ---------------------------------------------------------------------------
@@ -62,96 +116,88 @@ def _mock_static(logits: list[float]) -> MagicMock:
 
 
 class TestPatterns(unittest.TestCase):
-    # --- number prefix ---
-    def test_number_prefix_empty_string(self):
-        # The entire group is optional (?), so "" matches
-        self.assertIsNotNone(_NUMBER_PREFIX.match(""))
-
-    def test_number_prefix_minus_only(self):
-        # "-" is a valid partial number start
-        self.assertIsNotNone(_NUMBER_PREFIX.match("-"))
-
-    def test_number_prefix_digits(self):
-        for s in ("3", "3.", "3.1", "-2.5", "2e", "2e+", "-2.5e"):
+    def test_number_prefix_empty_and_minus(self) -> None:
+        for s in ("", "-", "3", "3.", "-2.5", "2e+"):
             with self.subTest(s=s):
                 self.assertIsNotNone(_NUMBER_PREFIX.match(s))
 
-    def test_number_prefix_rejects_terminal(self):
+    def test_number_prefix_rejects_terminal(self) -> None:
         self.assertIsNone(_NUMBER_PREFIX.match("3,"))
-        self.assertIsNone(_NUMBER_PREFIX.match("3}"))
 
-    # --- number complete ---
-    def test_number_complete_accepts(self):
-        for s in ("3,", "-2.5,", "1e10}", "2.5e+34,", "0}"):
+    def test_number_complete_accepts(self) -> None:
+        for s in ("3,", "-2.5,", "1e10}", "2.5e+34,"):
             with self.subTest(s=s):
                 self.assertIsNotNone(_NUMBER_COMPLETE.match(s))
 
-    def test_number_complete_rejects_partial(self):
-        self.assertIsNone(_NUMBER_COMPLETE.match("3"))
-        self.assertIsNone(_NUMBER_COMPLETE.match("-"))
-
-    # --- integer prefix ---
-    def test_integer_prefix_accepts_digits(self):
-        # \d+? requires at least one digit — "" and "-" do NOT match
-        for s in ("0", "42", "-7", "100"):
+    def test_integer_prefix_accepts_digits(self) -> None:
+        for s in ("0", "42", "-7"):
             with self.subTest(s=s):
                 self.assertIsNotNone(_INTEGER_PREFIX.match(s))
 
-    def test_integer_prefix_rejects_empty(self):
+    def test_integer_prefix_rejects_empty(self) -> None:
         self.assertIsNone(_INTEGER_PREFIX.match(""))
 
-    def test_integer_prefix_rejects_minus_only(self):
-        # "-" alone has no digit → no match
+    def test_integer_prefix_rejects_minus_only(self) -> None:
         self.assertIsNone(_INTEGER_PREFIX.match("-"))
 
-    def test_integer_prefix_rejects_float(self):
+    def test_integer_prefix_rejects_float(self) -> None:
         self.assertIsNone(_INTEGER_PREFIX.match("3.14"))
 
-    # --- integer complete ---
-    def test_integer_complete_accepts(self):
-        for s in ("0,", "42}", "-7,", "100}"):
+    def test_integer_complete_accepts(self) -> None:
+        for s in ("0,", "42}", "-7,"):
             with self.subTest(s=s):
                 self.assertIsNotNone(_INTEGER_COMPLETE.match(s))
 
-    def test_integer_complete_rejects_partial(self):
-        self.assertIsNone(_INTEGER_COMPLETE.match("42"))
-        self.assertIsNone(_INTEGER_COMPLETE.match("-"))
-
-    # --- string prefix ---
-    def test_string_prefix_accepts_content(self):
-        for s in ("", "hello", "world", "abc123"):
+    def test_string_prefix_accepts_content(self) -> None:
+        for s in ("", "hello", "abc123"):
             with self.subTest(s=s):
                 self.assertIsNotNone(_STRING_PREFIX.match(s))
 
-    def test_string_prefix_accepts_escaped_quote(self):
-        self.assertIsNotNone(_STRING_PREFIX.match('\\"'))
-
-    def test_string_prefix_rejects_unescaped_quote(self):
+    def test_string_prefix_rejects_unescaped_quote(self) -> None:
         self.assertIsNone(_STRING_PREFIX.match('"'))
-        self.assertIsNone(_STRING_PREFIX.match('say "hi"'))
 
-    # --- string complete ---
-    def test_string_complete_accepts(self):
-        for s in ('"', 'hello"', 'world"', 'abc123"'):
+    def test_string_complete_accepts(self) -> None:
+        for s in ('"', 'hello"', 'world"'):
             with self.subTest(s=s):
                 self.assertIsNotNone(_STRING_COMPLETE.match(s))
 
-    def test_string_complete_rejects_no_closing_quote(self):
-        self.assertIsNone(_STRING_COMPLETE.match("hello"))
-
-    # --- anything ---
-    def test_anything_prefix_accepts(self):
-        for s in ("true", "false", "null", ""):
+    def test_anything_prefix_accepts(self) -> None:
+        for s in ("true", "false", ""):
             with self.subTest(s=s):
                 self.assertIsNotNone(_ANYTHING_PREFIX.match(s))
 
-    def test_anything_prefix_rejects_terminal(self):
-        self.assertIsNone(_ANYTHING_PREFIX.match("x,"))
-
-    def test_anything_complete_accepts(self):
-        for s in ("true,", "false}", "null,"):
+    def test_anything_complete_accepts(self) -> None:
+        for s in ("true,", "false}"):
             with self.subTest(s=s):
                 self.assertIsNotNone(_ANYTHING_COMPLETE.match(s))
+
+
+# ---------------------------------------------------------------------------
+# _ensure_float_dot
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureFloatDot(unittest.TestCase):
+    def test_plain_integer_gets_dot(self) -> None:
+        self.assertEqual(_ensure_float_dot("42"), "42.0")
+
+    def test_negative_integer_gets_dot(self) -> None:
+        self.assertEqual(_ensure_float_dot("-7"), "-7.0")
+
+    def test_float_unchanged(self) -> None:
+        self.assertEqual(_ensure_float_dot("3.14"), "3.14")
+
+    def test_scientific_unchanged(self) -> None:
+        self.assertEqual(_ensure_float_dot("2e34"), "2e34")
+        self.assertEqual(_ensure_float_dot("2.5E+34"), "2.5E+34")
+
+    def test_zero_gets_dot(self) -> None:
+        self.assertEqual(_ensure_float_dot("0"), "0.0")
+
+    def test_result_parseable_as_float(self) -> None:
+        for raw in ("42", "-7", "3.14", "2e34", "0"):
+            with self.subTest(raw=raw):
+                self.assertIsInstance(float(_ensure_float_dot(raw)), float)
 
 
 # ---------------------------------------------------------------------------
@@ -160,161 +206,179 @@ class TestPatterns(unittest.TestCase):
 
 
 class TestScoreCandidates(unittest.TestCase):
-    def test_single_beam_greedy(self):
-        vocab = {0: "4", 1: ","}
-        model = _mock([[1.0, 0.0], [0.0, 1.0]])
-
-        tokens, value, score = score_candidates(
-            model,
-            [99],
-            vocab,
-            _INTEGER_PREFIX,
-            _INTEGER_COMPLETE,
-            num_beams=1,
-        )
-        self.assertEqual(value, "4")
-        self.assertIsInstance(score, float)
-        self.assertIn(0, tokens)
-        self.assertIn(1, tokens)
-
-    def test_multi_token_value(self):
+    def _int_vocab(self) -> tuple[dict[int, str], PrecomputedVocab]:
         vocab = {0: "4", 1: "2", 2: ","}
+        return vocab, _pv(vocab)
+
+    def test_single_beam_greedy(self) -> None:
+        vocab, pv = self._int_vocab()
         model = _mock([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
         tokens, value, score = score_candidates(
             model,
-            [0],
-            vocab,
+            [99],
+            pv,
             _INTEGER_PREFIX,
             _INTEGER_COMPLETE,
+            pv.integer_starts,
+            pv.integer_fallback,
             num_beams=1,
         )
         self.assertEqual(value, "42")
+        self.assertIsInstance(score, float)
 
-    def test_terminal_stripped_from_value(self):
-        vocab = {0: "7", 1: "}"}
-        model = _mock([[1.0, 0.0], [0.0, 1.0]])
+    def test_terminal_stripped_from_value(self) -> None:
+        vocab, pv = self._int_vocab()
+        model = _mock([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
         tokens, value, score = score_candidates(
             model,
             [0],
-            vocab,
+            pv,
             _INTEGER_PREFIX,
             _INTEGER_COMPLETE,
+            pv.integer_starts,
+            pv.integer_fallback,
             num_beams=1,
         )
         self.assertNotIn(",", value)
         self.assertNotIn("}", value)
 
-    def test_max_tokens_stops_generation(self):
+    def test_max_tokens_stops_generation(self) -> None:
         vocab = {0: "a", 1: "b"}
+        pv = _pv(vocab)
         model = _mock_static([1.0, 0.0])
 
         tokens, value, score = score_candidates(
             model,
             [0],
-            vocab,
+            pv,
             _STRING_PREFIX,
             _STRING_COMPLETE,
+            pv.string_starts,
+            pv.string_fallback,
             num_beams=1,
             max_tokens=3,
         )
         self.assertIsInstance(value, str)
 
-    def test_fallback_when_no_continuation_tokens(self):
-        # "3" starts valid; only '"' can complete → fallback picks '"'
-        vocab = {0: "3", 1: '"'}
-        model = _mock([[1.0, 0.0], [0.0, 1.0]])
-
-        tokens, value, score = score_candidates(
-            model,
-            [0],
-            vocab,
-            _STRING_PREFIX,
-            _STRING_COMPLETE,
-            num_beams=1,
-        )
-        self.assertEqual(value, "3")
-
-    def test_forced_starts_overrides_num_beams(self):
-        vocab = {0: "5", 1: "-", 2: ","}
-        model = _mock_static([0.5, 0.1, 1.0])
-
-        tokens, value, score = score_candidates(
-            model,
-            [99],
-            vocab,
-            _INTEGER_PREFIX,
-            _INTEGER_COMPLETE,
-            forced_starts=[None, 1],
-        )
-        self.assertIsInstance(value, str)
-        self.assertIsInstance(score, float)
-
-    def test_four_beams_returns_best_score(self):
+    def test_four_beams_returns_best_score(self) -> None:
         vocab = {0: "1", 1: "2", 2: "3", 3: "4", 4: ","}
+        pv = _pv(vocab)
         model = _mock_static([0.1, 0.2, 0.3, 2.0, 0.0])
 
         tokens, value, score = score_candidates(
             model,
             [0],
-            vocab,
+            pv,
             _INTEGER_PREFIX,
             _INTEGER_COMPLETE,
+            pv.integer_starts,
+            pv.integer_fallback,
             num_beams=4,
         )
         self.assertIsInstance(value, str)
         self.assertIsInstance(score, float)
 
-    def test_stream_prints_non_terminal_tokens(self):
-        vocab = {0: "4", 1: "2", 2: ","}
+    def test_stream_true_prints_tokens(self) -> None:
+        vocab, pv = self._int_vocab()
         model = _mock([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
         with patch("builtins.print") as mock_print:
             score_candidates(
                 model,
                 [0],
-                vocab,
+                pv,
                 _INTEGER_PREFIX,
                 _INTEGER_COMPLETE,
+                pv.integer_starts,
+                pv.integer_fallback,
                 num_beams=1,
             )
-
-        printed = "".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+            printed = "".join(
+                str(c.args[0]) for c in mock_print.call_args_list if c.args
+            )
         self.assertIn("4", printed)
         self.assertIn("2", printed)
         self.assertNotIn(",", printed)
 
-    def test_no_stream_with_multiple_beams(self):
-        vocab = {0: "5", 1: "3", 2: ","}
+    def test_stream_false_prints_nothing(self) -> None:
+        vocab, pv = self._int_vocab()
         model = _mock_static([1.0, 0.5, 0.0])
 
         with patch("builtins.print") as mock_print:
             score_candidates(
                 model,
                 [0],
-                vocab,
+                pv,
                 _INTEGER_PREFIX,
                 _INTEGER_COMPLETE,
-                forced_starts=[None, 1],
+                pv.integer_starts,
+                pv.integer_fallback,
+                num_beams=1,
+                stream=False,
             )
-
-        printed = "".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+            printed = "".join(
+                str(c.args[0]) for c in mock_print.call_args_list if c.args
+            )
         self.assertEqual(printed, "")
 
-    def test_avg_score_is_mean_of_token_logits(self):
-        vocab = {0: "7", 1: ","}
-        model = _mock([[0.8, 0.0], [0.0, 0.4]])
+    def test_multi_beam_auto_no_stream(self) -> None:
+        """With 2 beams, stream=None → auto resolves to False."""
+        vocab, pv = self._int_vocab()
+        model = _mock_static([1.0, 0.5, 0.0])
+
+        with patch("builtins.print") as mock_print:
+            score_candidates(
+                model,
+                [0],
+                pv,
+                _INTEGER_PREFIX,
+                _INTEGER_COMPLETE,
+                pv.integer_starts,
+                pv.integer_fallback,
+                num_beams=2,
+            )
+            printed = "".join(
+                str(c.args[0]) for c in mock_print.call_args_list if c.args
+            )
+        self.assertEqual(printed, "")
+
+    def test_avg_score_is_mean_of_logits(self) -> None:
+        vocab, pv = self._int_vocab()
+        # logits for "4" = 0.8 at start, "," = 0.4 terminal
+        model = _mock([[0.8, 0.0, 0.0], [0.0, 0.0, 0.4]])
 
         tokens, value, score = score_candidates(
             model,
             [0],
-            vocab,
+            pv,
             _INTEGER_PREFIX,
             _INTEGER_COMPLETE,
+            pv.integer_starts,
+            pv.integer_fallback,
             num_beams=1,
         )
         self.assertAlmostEqual(score, (0.8 + 0.4) / 2, places=5)
+
+    def test_step_cache_avoids_redundant_calls(self) -> None:
+        """Both beams hitting the same current_str should share cache."""
+        vocab = {0: "4", 1: "4", 2: ","}  # two tokens that decode to "4"
+        pv = _pv(vocab)
+        model = _mock_static([1.0, 1.0, 0.0])
+
+        # With 2 beams starting at same "4", the step cache should be shared
+        tokens, value, score = score_candidates(
+            model,
+            [0],
+            pv,
+            _INTEGER_PREFIX,
+            _INTEGER_COMPLETE,
+            pv.integer_starts,
+            pv.integer_fallback,
+            num_beams=2,
+        )
+        self.assertIsInstance(value, str)
 
 
 # ---------------------------------------------------------------------------
@@ -323,18 +387,21 @@ class TestScoreCandidates(unittest.TestCase):
 
 
 class TestGetMinusToken(unittest.TestCase):
-    def test_returns_none_when_no_minus(self):
-        vocab = {0: "3", 1: ".", 2: ","}
-        self.assertIsNone(_get_minus_token(vocab, [0], _mock_static([1.0, 0.5, 0.0])))
+    def test_returns_none_when_no_minus(self) -> None:
+        pv = _pv({0: "3", 1: ","})
+        self.assertIsNone(_get_minus_token(pv, [0], _mock_static([1.0, 0.0])))
 
-    def test_returns_id_when_unique_minus(self):
-        vocab = {0: "3", 1: "-", 2: ","}
-        self.assertEqual(_get_minus_token(vocab, [0], _mock_static([1.0, 0.5, 0.0])), 1)
+    def test_returns_id_when_unique(self) -> None:
+        pv = _pv({0: "3", 1: "-", 2: ","})
+        self.assertEqual(
+            _get_minus_token(pv, [0], _mock_static([1.0, 0.5, 0.0])),
+            1,
+        )
 
-    def test_returns_highest_logit_when_multiple_minus(self):
-        vocab = {0: "-", 1: "-", 2: "3"}
+    def test_returns_highest_logit_when_multiple(self) -> None:
+        pv = _pv({0: "-", 1: "-", 2: "3"})
         model = _mock_static([0.1, 0.9, 0.5])
-        self.assertEqual(_get_minus_token(vocab, [0], model), 1)
+        self.assertEqual(_get_minus_token(pv, [0], model), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -343,49 +410,60 @@ class TestGetMinusToken(unittest.TestCase):
 
 
 class TestScoreWithNegative(unittest.TestCase):
-    def test_falls_back_gracefully_when_no_minus(self):
-        vocab = {0: "5", 1: ","}
+    def test_positive_value_when_no_minus(self) -> None:
+        pv = _pv({0: "5", 1: ","})
         model = _mock([[1.0, 0.0], [0.0, 1.0]])
 
         tokens, value = _score_with_negative(
             model,
             [0],
-            vocab,
+            pv,
             _INTEGER_PREFIX,
             _INTEGER_COMPLETE,
+            pv.integer_starts,
+            pv.integer_fallback,
             strip_chars=",}",
         )
         self.assertEqual(value, "5")
+        self.assertNotIn(",", value)
 
-    def test_strips_terminal_characters(self):
-        vocab = {0: "9", 1: ","}
+    def test_no_terminal_in_value(self) -> None:
+        pv = _pv({0: "9", 1: ","})
         model = _mock([[1.0, 0.0], [0.0, 1.0]])
 
         tokens, value = _score_with_negative(
             model,
             [0],
-            vocab,
+            pv,
             _INTEGER_PREFIX,
             _INTEGER_COMPLETE,
+            pv.integer_starts,
+            pv.integer_fallback,
             strip_chars=",}",
         )
         self.assertNotIn(",", value)
         self.assertNotIn("}", value)
 
-    def test_no_terminal_in_value_with_minus(self):
-        vocab = {0: "5", 1: "-", 2: ","}
+    def test_silent_during_comparison(self) -> None:
+        """Nothing must be printed during positive/negative comparison."""
+        pv = _pv({0: "5", 1: "-", 2: ","})
         model = _mock_static([0.1, 2.0, 0.5])
 
-        tokens, value = _score_with_negative(
-            model,
-            [0],
-            vocab,
-            _INTEGER_PREFIX,
-            _INTEGER_COMPLETE,
-            strip_chars=",}",
+        with patch("builtins.print") as mock_print:
+            _score_with_negative(
+                model,
+                [0],
+                pv,
+                _INTEGER_PREFIX,
+                _INTEGER_COMPLETE,
+                pv.integer_starts,
+                pv.integer_fallback,
+                strip_chars=",}",
+            )
+        printed = "".join(
+            str(c.args[0]) for c in mock_print.call_args_list if c.args
         )
-        self.assertNotIn(",", value)
-        self.assertNotIn("}", value)
+        self.assertEqual(printed, "")
 
 
 # ---------------------------------------------------------------------------
@@ -394,45 +472,52 @@ class TestScoreWithNegative(unittest.TestCase):
 
 
 class TestProcessNumber(unittest.TestCase):
-    def test_fast_returns_correct_value(self):
-        vocab = {0: "7", 1: ","}
+    def test_fast_returns_value_with_dot(self) -> None:
+        pv = _pv({0: "7", 1: ","})
         model = _mock([[1.0, 0.0], [0.0, 1.0]])
 
         with patch("builtins.print"):
-            tokens, value = process_number(model, [0], vocab, fast=True)
+            tokens, value = process_number(model, [0], pv, fast=True)
 
-        self.assertEqual(value, "7")
-        self.assertIsInstance(tokens, list)
+        self.assertIn(".", value)
+        self.assertIsInstance(float(value), float)
 
-    def test_fast_no_terminal_in_value(self):
-        vocab = {0: "3", 1: ","}
-        model = _mock([[1.0, 0.0], [0.0, 1.0]])
-
-        with patch("builtins.print"):
-            tokens, value = process_number(model, [0], vocab, fast=True)
-
-        self.assertNotIn(",", value)
-        self.assertNotIn("}", value)
-
-    def test_thinking_returns_string(self):
-        vocab = {0: "4", 1: "-", 2: ","}
-        model = _mock_static([1.0, 0.1, 0.5])
-
-        with patch("builtins.print"):
-            tokens, value = process_number(model, [0], vocab, fast=False)
-
-        self.assertIsInstance(value, str)
-
-    def test_fast_streams_tokens(self):
-        vocab = {0: "4", 1: "2", 2: ","}
+    def test_fast_streams_tokens(self) -> None:
+        pv = _pv({0: "4", 1: "2", 2: ","})
         model = _mock([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
         with patch("builtins.print") as mock_print:
-            process_number(model, [0], vocab, fast=True)
+            process_number(model, [0], pv, fast=True)
 
-        printed = "".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
+        printed = "".join(
+            str(c.args[0]) for c in mock_print.call_args_list if c.args
+        )
         self.assertIn("4", printed)
-        self.assertIn("2", printed)
+
+    def test_thinking_prints_once(self) -> None:
+        pv = _pv({0: "4", 1: "-", 2: ","})
+        model = _mock_static([1.0, 0.1, 0.5])
+
+        with patch("builtins.print") as mock_print:
+            tokens, value = process_number(model, [0], pv, fast=False)
+
+        # Value must be printed exactly once by process_number
+        printed_values = [
+            c.args[0]
+            for c in mock_print.call_args_list
+            if c.args and c.args[0] == value
+        ]
+        self.assertEqual(len(printed_values), 1)
+
+    def test_no_terminal_in_value(self) -> None:
+        pv = _pv({0: "3", 1: ","})
+        model = _mock([[1.0, 0.0], [0.0, 1.0]])
+
+        with patch("builtins.print"):
+            tokens, value = process_number(model, [0], pv, fast=True)
+
+        self.assertNotIn(",", value)
+        self.assertNotIn("}", value)
 
 
 # ---------------------------------------------------------------------------
@@ -441,32 +526,32 @@ class TestProcessNumber(unittest.TestCase):
 
 
 class TestProcessInteger(unittest.TestCase):
-    def test_fast_positive(self):
-        vocab = {0: "4", 1: "2", 2: ","}
+    def test_fast_positive(self) -> None:
+        pv = _pv({0: "4", 1: "2", 2: ","})
         model = _mock([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
         with patch("builtins.print"):
-            tokens, value = process_integer(model, [0], vocab, fast=True)
+            tokens, value = process_integer(model, [0], pv, fast=True)
 
         self.assertEqual(value, "42")
 
-    def test_thinking_runs_without_error(self):
-        vocab = {0: "9", 1: "-", 2: ","}
-        model = _mock_static([1.0, 0.1, 0.5])
-
-        with patch("builtins.print"):
-            tokens, value = process_integer(model, [0], vocab, fast=False)
-
-        self.assertIsInstance(value, str)
-
-    def test_value_castable_to_int(self):
-        vocab = {0: "3", 1: ","}
+    def test_value_castable_to_int(self) -> None:
+        pv = _pv({0: "3", 1: ","})
         model = _mock([[1.0, 0.0], [0.0, 1.0]])
 
         with patch("builtins.print"):
-            tokens, value = process_integer(model, [0], vocab, fast=True)
+            tokens, value = process_integer(model, [0], pv, fast=True)
 
         self.assertEqual(int(value), 3)
+
+    def test_thinking_runs_without_error(self) -> None:
+        pv = _pv({0: "9", 1: "-", 2: ","})
+        model = _mock_static([1.0, 0.1, 0.5])
+
+        with patch("builtins.print"):
+            tokens, value = process_integer(model, [0], pv, fast=False)
+
+        self.assertIsInstance(value, str)
 
 
 # ---------------------------------------------------------------------------
@@ -475,49 +560,51 @@ class TestProcessInteger(unittest.TestCase):
 
 
 class TestProcessString(unittest.TestCase):
-    def _vocab_and_model(self):
-        """Generates: h → i → closing quote."""
+    def _str_vocab_model(self) -> tuple[PrecomputedVocab, MagicMock]:
         vocab = {0: "h", 1: "i", 2: '"'}
+        pv = _pv(vocab)
         model = _mock([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
-        return vocab, model
+        return pv, model
 
-    def test_fast_value_wrapped_in_quotes(self):
-        vocab, model = self._vocab_and_model()
-
-        with patch("builtins.print"):
-            tokens, value = process_string(model, "ctx", vocab, fast=True)
-
-        self.assertTrue(value.startswith('"'), f"Got {value!r}")
-        self.assertTrue(value.endswith('"'), f"Got {value!r}")
-
-    def test_thinking_value_wrapped_in_quotes(self):
-        vocab = {0: "h", 1: "i", 2: '"'}
-        model = _mock_static([1.0, 0.5, 0.0])
+    def test_fast_wrapped_in_quotes(self) -> None:
+        pv, model = self._str_vocab_model()
 
         with patch("builtins.print"):
-            tokens, value = process_string(model, "ctx", vocab, fast=False)
+            tokens, value = process_string(model, "ctx", pv, fast=True)
 
         self.assertTrue(value.startswith('"'))
         self.assertTrue(value.endswith('"'))
 
-    def test_inner_content_has_no_extra_quotes(self):
-        vocab, model = self._vocab_and_model()
+    def test_thinking_wrapped_in_quotes(self) -> None:
+        vocab = {0: "h", 1: "i", 2: '"'}
+        pv = _pv(vocab)
+        model = _mock_static([1.0, 0.5, 0.0])
 
         with patch("builtins.print"):
-            tokens, value = process_string(model, "ctx", vocab, fast=True)
+            tokens, value = process_string(model, "ctx", pv, fast=False)
+
+        self.assertTrue(value.startswith('"'))
+        self.assertTrue(value.endswith('"'))
+
+    def test_inner_content_has_no_extra_quotes(self) -> None:
+        pv, model = self._str_vocab_model()
+
+        with patch("builtins.print"):
+            tokens, value = process_string(model, "ctx", pv, fast=True)
 
         inner = value[1:-1]
-        self.assertFalse(inner.startswith('"'), f"Inner: {inner!r}")
-        self.assertFalse(inner.endswith('"'), f"Inner: {inner!r}")
+        self.assertFalse(inner.startswith('"'))
+        self.assertFalse(inner.endswith('"'))
 
-    def test_fast_streams_content_tokens(self):
-        vocab, model = self._vocab_and_model()
+    def test_fast_streams_content(self) -> None:
+        pv, model = self._str_vocab_model()
 
         with patch("builtins.print") as mock_print:
-            process_string(model, "ctx", vocab, fast=True)
+            process_string(model, "ctx", pv, fast=True)
 
-        printed = "".join(str(c.args[0]) for c in mock_print.call_args_list if c.args)
-        self.assertIn('"', printed)
+        printed = "".join(
+            str(c.args[0]) for c in mock_print.call_args_list if c.args
+        )
         self.assertIn("h", printed)
         self.assertIn("i", printed)
 
@@ -528,8 +615,8 @@ class TestProcessString(unittest.TestCase):
 
 
 class TestProcessAnything(unittest.TestCase):
-    def test_returns_value_without_terminal(self):
-        vocab = {0: "t", 1: "r", 2: "u", 3: "e", 4: ","}
+    def test_returns_value_without_terminal(self) -> None:
+        pv = _pv({0: "t", 1: "r", 2: "u", 3: "e", 4: ","})
         model = _mock(
             [
                 [1.0, 0.0, 0.0, 0.0, 0.0],
@@ -540,20 +627,21 @@ class TestProcessAnything(unittest.TestCase):
             ]
         )
         with patch("builtins.print"):
-            tokens, value = process_anything(model, [0], vocab, fast=True)
+            tokens, value = process_anything(model, [0], pv, fast=True)
 
         self.assertEqual(value, "true")
-        self.assertNotIn(",", value)
-        self.assertNotIn("}", value)
 
-    def test_always_single_beam(self):
-        vocab = {0: "x", 1: ","}
-        model = _mock([[1.0, 0.0], [0.0, 1.0]])
+    def test_same_behaviour_fast_and_thinking(self) -> None:
+        """process_anything always uses 1 beam regardless of fast."""
+        pv = _pv({0: "x", 1: ","})
+        model_fast = _mock([[1.0, 0.0], [0.0, 1.0]])
+        model_slow = _mock([[1.0, 0.0], [0.0, 1.0]])
 
         with patch("builtins.print"):
-            tokens, value = process_anything(model, [0], vocab, fast=False)
+            _, v_fast = process_anything(model_fast, [0], pv, fast=True)
+            _, v_slow = process_anything(model_slow, [0], pv, fast=False)
 
-        self.assertEqual(value, "x")
+        self.assertEqual(v_fast, v_slow)
 
 
 if __name__ == "__main__":

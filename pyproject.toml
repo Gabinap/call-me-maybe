@@ -7,7 +7,16 @@ requires-python = ">=3.12"
 dependencies = [
     "accelerate>=1.13.0",
     "llm_sdk @ file://${PROJECT_ROOT}/llm_sdk",
+    "mypy>=1.20.0",
     "numpy>=2.4.3",
     "pydantic>=2.12.5",
     "pytest>=9.0.2",
 ]
+
+[tool.mypy]
+exclude = ["llm_sdk/", "tests/", ".venv/"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["llm_sdk", "llm_sdk.*"]
+follow_imports = "skip"

@@ -6,6 +6,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
 
 class FunctionDef(BaseModel):
     name: str
@@ -36,7 +40,7 @@ class Args(BaseModel):
         description="Functions called by LLM file.",
     )
     mode: Literal["fast", "thinking"] = Field(
-        default="thinking",
+        default="fast",
         description=(
             "fast: single beam, tokens streamed immediately. "
             "thinking: positive+negative beams for numbers/integers, "
@@ -53,8 +57,103 @@ class Args(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Parameter schema validation helpers
+# ---------------------------------------------------------------------------
+
+_VALID_TYPES = {"string", "number", "integer", "boolean", "object", "array"}
+
+
+def _validate_param_schema(schema: Any, path: str = "") -> bool:
+    """Recursively validate a parameter schema dict.
+
+    Accepted types: string, number, integer, boolean, object, array.
+    For ``"object"`` types, ``"properties"`` must be a non-empty dict and
+    each property is validated recursively.
+
+    Args:
+        schema: The parameter schema value to validate (should be a dict).
+        path: Dotted path string for error messages (e.g. ``"user.address"``).
+
+    Returns:
+        True if valid, False otherwise (with a warning printed).
+    """
+    if not isinstance(schema, dict):
+        print(f"Warning: parameter schema at '{path}' must be an object")
+        return False
+
+    param_type = schema.get("type")
+    if not isinstance(param_type, str) or param_type not in _VALID_TYPES:
+        print(
+            f"Warning: parameter '{path}' has invalid or missing type "
+            f"(got {param_type!r}). Valid types: {sorted(_VALID_TYPES)}"
+        )
+        return False
+
+    if param_type == "object":
+        properties = schema.get("properties")
+        if not isinstance(properties, dict) or not properties:
+            print(
+                f"Warning: parameter '{path}' is type 'object' but "
+                f"'properties' is missing or empty — will be skipped"
+            )
+            return False
+        for prop_name, prop_schema in properties.items():
+            if not _validate_param_schema(
+                prop_schema, path=f"{path}.{prop_name}"
+                    ):
+                return False
+
+    return True
+
+
+def _validate_parameters(
+    parameters: dict[str, Any] | None, func_name: str
+) -> dict[str, Any] | None:
+    """Validate all parameter schemas for a function definition.
+
+    Invalid parameters are removed with a warning rather than rejecting the
+    whole function definition.
+
+    Args:
+        parameters: Raw parameters dict from the JSON input.
+        func_name: Function name used in warning messages.
+
+    Returns:
+        Filtered parameters dict with only valid entries, or None if empty.
+    """
+    if parameters is None:
+        return None
+    if not isinstance(parameters, dict):
+        print(f"Warning: 'parameters' for '{func_name}' \
+              must be an object — ignored")
+        return None
+
+    valid: dict[str, Any] = {}
+    for param_name, param_schema in parameters.items():
+        if _validate_param_schema(
+            param_schema, path=f"{func_name}.{param_name}"
+        ):
+            valid[param_name] = param_schema
+        else:
+            print(
+                f"Warning: dropping invalid parameter '{param_name}' \
+                    from '{func_name}'"
+            )
+
+    return valid if valid else None
+
+
+# ---------------------------------------------------------------------------
+# Parsing functions
+# ---------------------------------------------------------------------------
+
+
 def functions_def_parsing(f_d_file: str) -> list[FunctionDef]:
     """Parse and validate the functions definition file.
+
+    Supports flat parameter types (string, number, integer, boolean) and
+    nested object types (``"type": "object"`` with ``"properties"``).
 
     Args:
         f_d_file: Path to the JSON file containing function definitions.
@@ -93,7 +192,18 @@ def functions_def_parsing(f_d_file: str) -> list[FunctionDef]:
                     " non-empty string"
                 )
                 continue
-            func = FunctionDef.model_validate({**item, "returns": returns_type})
+
+            validated_params = _validate_parameters(
+                item.get("parameters"), item.get("name", "<unknown>")
+            )
+
+            func = FunctionDef.model_validate(
+                {
+                    **item,
+                    "returns": returns_type,
+                    "parameters": validated_params,
+                }
+            )
             valid_functions.append(func)
         except ValidationError as e:
             print(f"Skipping invalid function: {e}")
@@ -147,7 +257,8 @@ def command_parsing() -> dict[str, Any]:
         Dictionary of provided argument names to their values.
     """
     parser = argparse.ArgumentParser(
-        description="Translate natural language prompts into structured function calls."
+        description="Translate natural language prompts into structured \
+            function calls."
     )
     parser.add_argument(
         "--functions_definition",
@@ -171,19 +282,21 @@ def command_parsing() -> dict[str, Any]:
         "--mode",
         type=str,
         choices=["fast", "thinking"],
-        default="thinking",
+        default="fast",
         help=(
-            "fast: single beam, tokens streamed immediately. "
+            "fast: single beam, tokens streamed immediately (default). "
             "thinking: positive+negative beams for numbers/integers, "
-            "4 beams for strings (default: thinking)."
+            "4 beams for strings."
         ),
     )
 
-    return {k: v for k, v in vars(parser.parse_args()).items() if v is not None}
+    return {k: v for k, v in vars(parser.parse_args()).items()
+            if v is not None}
 
 
 def parse() -> Args:
-    """Parse all CLI arguments and input files; return a validated Args instance.
+    """Parse all CLI arguments and input files;
+    return a validated Args instance.
 
     Returns:
         Fully populated Args instance.

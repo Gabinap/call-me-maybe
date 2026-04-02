@@ -1,5 +1,8 @@
 [
   {
+    "prompt": "Create a user with name 'John', age 30, and address 'New York, NY'"
+  },
+  {
     "prompt": "What is the sum of -2.5e+34 and 3?"
   },
   {

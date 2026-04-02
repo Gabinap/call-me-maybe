@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 # Import the two pure utility functions we can test without running the LLM
@@ -25,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class TestGetVocabulary(unittest.TestCase):
-    def _write_vocab(self, vocab: dict) -> str:
+    def _write_vocab(self, vocab: dict[str, int]) -> str:
         f = tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False, encoding="utf-8"
         )
@@ -33,7 +34,7 @@ class TestGetVocabulary(unittest.TestCase):
         f.close()
         return f.name
 
-    def test_loads_vocab_correctly(self):
+    def test_loads_vocab_correctly(self) -> None:
         vocab = {"hello": 0, "world": 1, "<unk>": 2}
         path = self._write_vocab(vocab)
         try:
@@ -44,7 +45,7 @@ class TestGetVocabulary(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_returns_dict(self):
+    def test_returns_dict(self) -> None:
         path = self._write_vocab({"a": 0})
         try:
             model = MagicMock()
@@ -53,7 +54,7 @@ class TestGetVocabulary(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_calls_get_path_to_vocab_file(self):
+    def test_calls_get_path_to_vocab_file(self) -> None:
         path = self._write_vocab({})
         try:
             model = MagicMock()
@@ -63,7 +64,7 @@ class TestGetVocabulary(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_large_vocab_loaded_completely(self):
+    def test_large_vocab_loaded_completely(self) -> None:
         vocab = {str(i): i for i in range(1000)}
         path = self._write_vocab(vocab)
         try:
@@ -81,7 +82,7 @@ class TestGetVocabulary(unittest.TestCase):
 
 
 class TestWriteOutput(unittest.TestCase):
-    def _sample_results(self):
+    def _sample_results(self) -> list[dict[str, Any]]:
         return [
             {
                 "prompt": "Add 2 and 3",
@@ -95,7 +96,7 @@ class TestWriteOutput(unittest.TestCase):
             },
         ]
 
-    def test_creates_valid_json_file(self):
+    def test_creates_valid_json_file(self) -> None:
         results = self._sample_results()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
@@ -106,14 +107,14 @@ class TestWriteOutput(unittest.TestCase):
                 loaded = json.load(f)
             self.assertEqual(loaded, results)
 
-    def test_creates_nested_parent_directories(self):
+    def test_creates_nested_parent_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "a", "b", "c", "output.json")
             with patch("builtins.print"):
                 write_output([], path)
             self.assertTrue(os.path.exists(path))
 
-    def test_empty_results_writes_empty_array(self):
+    def test_empty_results_writes_empty_array(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
             with patch("builtins.print"):
@@ -121,7 +122,7 @@ class TestWriteOutput(unittest.TestCase):
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), [])
 
-    def test_preserves_float_type(self):
+    def test_preserves_float_type(self) -> None:
         results = [{"prompt": "p", "name": "fn", "parameters": {"a": 2.5}}]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
@@ -131,7 +132,7 @@ class TestWriteOutput(unittest.TestCase):
                 loaded = json.load(f)
             self.assertIsInstance(loaded[0]["parameters"]["a"], float)
 
-    def test_preserves_int_type(self):
+    def test_preserves_int_type(self) -> None:
         results = [{"prompt": "p", "name": "fn", "parameters": {"n": 3}}]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
@@ -141,7 +142,7 @@ class TestWriteOutput(unittest.TestCase):
                 loaded = json.load(f)
             self.assertIsInstance(loaded[0]["parameters"]["n"], int)
 
-    def test_preserves_string_type(self):
+    def test_preserves_string_type(self) -> None:
         results = [{"prompt": "p", "name": "fn", "parameters": {"s": "hello"}}]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
@@ -151,8 +152,14 @@ class TestWriteOutput(unittest.TestCase):
                 loaded = json.load(f)
             self.assertIsInstance(loaded[0]["parameters"]["s"], str)
 
-    def test_non_ascii_characters_preserved(self):
-        results = [{"prompt": "héllo wörld", "name": "fn", "parameters": {"s": "café"}}]
+    def test_non_ascii_characters_preserved(self) -> None:
+        results = [
+            {
+                "prompt": "héllo wörld",
+                "name": "fn",
+                "parameters": {"s": "café"},
+            }
+        ]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
             with patch("builtins.print"):
@@ -162,7 +169,7 @@ class TestWriteOutput(unittest.TestCase):
             self.assertEqual(loaded[0]["prompt"], "héllo wörld")
             self.assertEqual(loaded[0]["parameters"]["s"], "café")
 
-    def test_os_error_does_not_raise(self):
+    def test_os_error_does_not_raise(self) -> None:
         with (
             patch("builtins.open", side_effect=OSError("disk full")),
             patch("os.makedirs"),
@@ -171,7 +178,7 @@ class TestWriteOutput(unittest.TestCase):
             # Must not propagate the exception
             write_output([], "/fake/path/output.json")
 
-    def test_output_is_indented_json(self):
+    def test_output_is_indented_json(self) -> None:
         results = [{"prompt": "p", "name": "fn", "parameters": {}}]
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")
@@ -182,7 +189,7 @@ class TestWriteOutput(unittest.TestCase):
             # json.dump with indent=2 produces multi-line output
             self.assertIn("\n", raw)
 
-    def test_multiple_entries_all_written(self):
+    def test_multiple_entries_all_written(self) -> None:
         results = self._sample_results()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "output.json")

@@ -1,5 +1,19 @@
 [
   {
+    "prompt": "Create a user with name 'John', age 30, and address 'New York, NY'",
+    "name": "fn_create_user",
+    "parameters": {
+      "user": {
+        "name": "John",
+        "age": 30,
+        "address": {
+          "city": "New York, NY",
+          "zip": "10001"
+        }
+      }
+    }
+  },
+  {
     "prompt": "What is the sum of -2.5e+34 and 3?",
     "name": "fn_add_numbers",
     "parameters": {

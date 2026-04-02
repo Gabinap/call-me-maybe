@@ -1,5 +1,26 @@
 [
   {
+  "name": "fn_create_user",
+  "description": "Create a user.",
+  "parameters": {
+    "user": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"},
+        "address": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string"},
+            "zip": {"type": "string"}
+          }
+        }
+      }
+    }
+  },
+  "returns": {"type": "string"}
+},
+  {
     "name": "fn_add_numbers",
     "description": "Add two numbers together and return their sum.",
     "parameters": {

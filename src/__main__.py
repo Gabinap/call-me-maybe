@@ -1,11 +1,11 @@
 import json
-import os
 from typing import Any
 
 from llm_sdk import Small_LLM_Model
 
 from .get_from_llm import get_function_parameters, get_valid_function_name
 from .parsing import Args, parse
+from .process import PrecomputedVocab
 
 
 def get_vocabulary(model_instance: Small_LLM_Model) -> dict[str, int]:
@@ -17,8 +17,15 @@ def get_vocabulary(model_instance: Small_LLM_Model) -> dict[str, int]:
     Returns:
         A dictionary mapping token strings to their token IDs.
     """
-    with open(model_instance.get_path_to_vocab_file()) as f:
-        return json.load(f)
+    with open(model_instance.get_path_to_vocab_file(), encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        token: token_id
+        for token, token_id in raw.items()
+        if isinstance(token, str) and isinstance(token_id, int)
+    }
 
 
 def write_output(results: list[dict[str, Any]], output_path: str) -> None:
@@ -28,6 +35,8 @@ def write_output(results: list[dict[str, Any]], output_path: str) -> None:
         results: List of result dicts, each with prompt/name/parameters keys.
         output_path: Destination file path.
     """
+    import os
+
     parent = os.path.dirname(output_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -42,12 +51,13 @@ def write_output(results: list[dict[str, Any]], output_path: str) -> None:
 def start_generation(args: Args, model: str) -> None:
     """Generate function call completions for the given prompts.
 
-    For each prompt, uses the language model to select a function and generate
-    its arguments using constrained decoding. Results are printed incrementally
-    to stdout and written as a JSON array to ``args.output``.
+    Optimisation 1: ``PrecomputedVocab.build`` scans the full vocabulary
+    once and stores all per-pattern token ID lists. Every call to
+    ``score_candidates`` receives these precomputed lists directly, avoiding
+    O(vocab × regex) scans at generation time.
 
     Args:
-        args: Parsed arguments containing prompts, function definitions, and mode.
+        args: Parsed arguments containing prompts, function definitions, mode.
         model: The name/path of the language model to use.
     """
     fast: bool = args.mode == "fast"
@@ -56,17 +66,23 @@ def start_generation(args: Args, model: str) -> None:
 
     vocab: dict[str, int] = get_vocabulary(model_instance)
     reverse_vocab: dict[int, str] = {v: k for k, v in vocab.items()}
+
+    # Decode every token once; pass the result everywhere instead of calling
+    # model_instance.decode() repeatedly at generation time.
     decoded_vocab: dict[int, str] = {
         t: model_instance.decode([t]) for t in reverse_vocab
     }
 
+    # Optimisation 1: single full-vocabulary scan at startup.
+    pv = PrecomputedVocab.build(decoded_vocab)
+
     func_names: str = ", ".join(f.name for f in args.functions)
-    encoded_func_names: list[int] = model_instance.encode(func_names)[0].tolist()
+    encoded_func_names: list[int] = (
+        model_instance.encode(func_names)[0].tolist()
+    )
 
     results: list[dict[str, Any]] = []
 
-    # `[` has no trailing newline: the leading `\n` in each prompt_prefix acts as
-    # the line separator between entries and as the single newline after `[`.
     print("[", end="", flush=True)
 
     for i, prompt in enumerate(args.prompts):
@@ -76,6 +92,7 @@ def start_generation(args: Args, model: str) -> None:
             args.functions,
             prompt,
             encoded_func_names,
+            pv,
         )
         encoded = encoded[len(encoded_func_names):]
         function_def = next(f for f in args.functions if f.name == func_name)
@@ -86,7 +103,7 @@ def start_generation(args: Args, model: str) -> None:
             encoded,
             function_def,
             prompt,
-            decoded_vocab,
+            pv,
             fast=fast,
         )
 
@@ -98,11 +115,10 @@ def start_generation(args: Args, model: str) -> None:
             }
         )
 
-        # No trailing newline: next entry's leading `\n` (prompt_prefix) provides it.
         if i < len(args.prompts) - 1:
             print("\n  },", end="", flush=True)
         else:
-            print("\n  }")  # last entry: print's own \n separates from `]`
+            print("\n  }")
 
     print("]")
     write_output(results, args.output)
