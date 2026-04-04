@@ -298,7 +298,7 @@ def get_function_parameters(
 
     context_parts: list[str] = [
         f'"{prompt}"\n',
-        f"Parameters: {', '.join(params.keys())}\n",
+        f"{', '.join(params.keys())}\n",
     ]
 
     param_names: list[str] = list(params.keys())

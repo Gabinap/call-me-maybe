@@ -55,6 +55,12 @@ class Args(BaseModel):
         default="Qwen/Qwen3-0.6B",
         description="HuggingFace model name or path.",
     )
+    workers: int = Field(
+        default=1,
+        description="Number of worker processes for parallel prompt processing.",
+        ge=1,
+        le=8,
+    )
     prompts: list[str] = Field(
         default_factory=list,
         description="LLM prompts.",
@@ -311,6 +317,12 @@ def command_parsing() -> dict[str, Any]:
         type=str,
         default="Qwen/Qwen3-0.6B",
         help="HuggingFace model name or path (default: Qwen/Qwen3-0.6B).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for parallel prompt processing (1-8).",
     )
 
     return {

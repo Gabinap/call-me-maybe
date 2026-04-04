@@ -16,7 +16,48 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.__main__ import get_vocabulary, write_output  # noqa: E402
+from src.__main__ import (  # noqa: E402
+    _generate_parallel,
+    get_vocabulary,
+    write_output,
+)
+from src.parsing import FunctionDef  # noqa: E402
+from src.process import PrecomputedVocab  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _tensor(ids: list[int]) -> MagicMock:
+    t = MagicMock()
+    t.tolist.return_value = ids
+    return t
+
+
+def _func(
+    name: str = "fn_test",
+    desc: str = "Test.",
+    params: dict[str, Any] | None = None,
+    returns: str | None = "string",
+) -> FunctionDef:
+    return FunctionDef.model_validate(
+        {
+            "name": name,
+            "description": desc,
+            "parameters": params,
+            "returns": returns,
+        }
+    )
+
+
+def _small_pv() -> PrecomputedVocab:
+    """Minimal PrecomputedVocab sufficient for test stubs."""
+    decoded = {i: str(i) for i in range(10)}
+    decoded[10] = '"'
+    decoded[11] = ","
+    return PrecomputedVocab.build(decoded)
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +252,101 @@ class TestWriteOutput(unittest.TestCase):
             self.assertEqual(len(loaded), 2)
             self.assertEqual(loaded[0]["name"], "fn_add")
             self.assertEqual(loaded[1]["name"], "fn_greet")
+
+
+# ---------------------------------------------------------------------------
+# _generate_parallel
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateParallel(unittest.TestCase):
+    """Test the parallel orchestrator.
+
+    We mock the entire Pool so no real child processes are spawned
+    and no model loading occurs.
+    """
+
+    def test_preserves_prompt_order(self) -> None:
+        """Results must be reassembled in input order regardless of
+        which worker finishes first."""
+        functions = [
+            _func("fn_greet", "Greet.", {"name": {"type": "string"}})
+        ]
+        prompts = ["Greet alice", "Greet bob", "Greet charlie"]
+
+        def fake_imap(fn: Any, batches: Any) -> list[Any]:
+            """Simulate imap_unordered without calling the real
+            worker (which would try to load the LLM model)."""
+            all_results = []
+            for batch_args in batches:
+                indexed_prompts = batch_args[0]
+                batch_results = [
+                    (idx, {
+                        "prompt": p,
+                        "name": "fn_greet",
+                        "parameters": {"name": p.split()[-1]},
+                    })
+                    for idx, p in indexed_prompts
+                ]
+                all_results.append(batch_results)
+            return all_results
+
+        with patch("builtins.print"):
+            with patch("src.__main__.multiprocessing") as mock_mp:
+                mock_ctx = MagicMock()
+                mock_mp.get_context.return_value = mock_ctx
+                mock_pool = MagicMock()
+                mock_ctx.Pool.return_value.__enter__ = (
+                    lambda self: mock_pool
+                )
+                mock_ctx.Pool.return_value.__exit__ = (
+                    lambda self, *a: None
+                )
+                mock_pool.imap_unordered.side_effect = fake_imap
+
+                results = _generate_parallel(
+                    prompts, functions, "fake-model", True, 2,
+                )
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0]["prompt"], "Greet alice")
+        self.assertEqual(results[1]["prompt"], "Greet bob")
+        self.assertEqual(results[2]["prompt"], "Greet charlie")
+
+    def test_single_prompt_uses_one_worker(self) -> None:
+        """num_workers is capped at len(prompts)."""
+        functions = [
+            _func("fn_greet", "Greet.", {"name": {"type": "string"}})
+        ]
+
+        def fake_imap(fn: Any, batches: Any) -> list[Any]:
+            return [
+                [(0, {
+                    "prompt": "p",
+                    "name": "fn_greet",
+                    "parameters": {},
+                })]
+            ]
+
+        with patch("builtins.print"):
+            with patch("src.__main__.multiprocessing") as mock_mp:
+                mock_ctx = MagicMock()
+                mock_mp.get_context.return_value = mock_ctx
+                mock_pool = MagicMock()
+                mock_ctx.Pool.return_value.__enter__ = (
+                    lambda self: mock_pool
+                )
+                mock_ctx.Pool.return_value.__exit__ = (
+                    lambda self, *a: None
+                )
+                mock_pool.imap_unordered.side_effect = fake_imap
+
+                results = _generate_parallel(
+                    ["p"], functions, "fake-model", True, 4,
+                )
+                mock_ctx.Pool.assert_called_once_with(processes=1)
+
+        self.assertEqual(len(results), 1)
 
 
 if __name__ == "__main__":

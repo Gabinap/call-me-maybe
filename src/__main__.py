@@ -1,11 +1,18 @@
 import json
+import math
+import multiprocessing
+import os
 from typing import Any
 
 from llm_sdk import Small_LLM_Model
 
-from .get_from_llm import get_function_parameters, get_valid_function_name
-from .parsing import Args, parse
+from .parsing import Args, FunctionDef, parse
 from .process import PrecomputedVocab
+from .worker import (
+    _init_model,
+    _process_one_prompt,
+    worker_process_batch,
+)
 
 
 def get_vocabulary(model_instance: Small_LLM_Model) -> dict[str, int]:
@@ -39,8 +46,6 @@ def write_output(results: list[dict[str, Any]], output_path: str) -> None:
                  keys.
         output_path: Destination file path.
     """
-    import os
-
     parent = os.path.dirname(output_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -52,81 +57,164 @@ def write_output(results: list[dict[str, Any]], output_path: str) -> None:
         print(f"\nError: could not write output file — {e}", flush=True)
 
 
-def start_generation(args: Args) -> None:
-    """Generate function call completions for the given prompts.
+# ---------------------------------------------------------------------------
+# Sequential generation (default, workers=1)
+# ---------------------------------------------------------------------------
 
-    Optimisation 1: ``PrecomputedVocab.build`` scans the full vocabulary
-    once and stores all per-pattern token ID lists. Every call to
-    ``score_candidates`` receives these precomputed lists directly,
-    avoiding O(vocab x regex) scans at generation time.
 
-    Args:Go
-        args: Parsed arguments containing prompts, function definitions,
-              mode, and model name.
+def _generate_sequential(
+    prompts: list[str],
+    model_instance: Small_LLM_Model,
+    reverse_vocab: dict[int, str],
+    functions: list[FunctionDef],
+    encoded_func_names: list[int],
+    pv: PrecomputedVocab,
+    fast: bool,
+) -> list[dict[str, Any]]:
+    """Process prompts one by one with live streaming output.
+
+    Args:
+        prompts: List of natural language prompts.
+        model_instance: The language model.
+        reverse_vocab: Token-ID-to-BPE-string mapping.
+        functions: Available function definitions.
+        encoded_func_names: Pre-encoded function name context tokens.
+        pv: Precomputed vocabulary data.
+        fast: Single-beam streaming mode flag.
+
+    Returns:
+        Ordered list of result dicts.
     """
-    fast: bool = args.mode == "fast"
-
-    model_instance = Small_LLM_Model(model_name=args.model)
-
-    vocab: dict[str, int] = get_vocabulary(model_instance)
-    reverse_vocab: dict[int, str] = {v: k for k, v in vocab.items()}
-
-    # Decode every token once; pass the result everywhere instead of
-    # calling model_instance.decode() repeatedly at generation time.
-    decoded_vocab: dict[int, str] = {
-        t: model_instance.decode([t]) for t in reverse_vocab
-    }
-
-    # Optimisation 1: single full-vocabulary scan at startup.
-    pv = PrecomputedVocab.build(decoded_vocab)
-
-    func_names: str = ", ".join(f.name for f in args.functions)
-    encoded_func_names: list[int] = (
-        model_instance.encode(func_names)[0].tolist()
-    )
-
     results: list[dict[str, Any]] = []
-
     print("[", end="", flush=True)
 
-    for i, prompt in enumerate(args.prompts):
-        encoded, func_name = get_valid_function_name(
-            reverse_vocab,
-            model_instance,
-            args.functions,
-            prompt,
-            encoded_func_names,
-            pv,
+    for i, prompt in enumerate(prompts):
+        result = _process_one_prompt(
+            prompt, model_instance, reverse_vocab,
+            functions, encoded_func_names, pv, fast,
         )
-        encoded = encoded[len(encoded_func_names):]
-        function_def = next(
-            f for f in args.functions if f.name == func_name
-        )
+        results.append(result)
 
-        parameters: dict[str, Any] = get_function_parameters(
-            reverse_vocab,
-            model_instance,
-            encoded,
-            function_def,
-            prompt,
-            pv,
-            fast=fast,
-        )
-
-        results.append(
-            {
-                "prompt": prompt,
-                "name": func_name,
-                "parameters": parameters,
-            }
-        )
-
-        if i < len(args.prompts) - 1:
+        if i < len(prompts) - 1:
             print("\n  },", end="", flush=True)
         else:
             print("\n  }")
 
     print("]")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Parallel generation (workers > 1) — one process per worker
+# ---------------------------------------------------------------------------
+
+
+def _generate_parallel(
+    prompts: list[str],
+    functions: list[FunctionDef],
+    model_name: str,
+    fast: bool,
+    num_workers: int,
+) -> list[dict[str, Any]]:
+    """Process prompts across multiple OS processes.
+
+    The prompts are split into ``num_workers`` contiguous batches.
+    Each batch is sent to a worker process which loads its own model
+    and processes its prompts independently.  Results are reassembled
+    in input order using the original indices.
+
+    The worker function ``worker_process_batch`` lives in ``src.worker``
+    (not in ``__main__``) so that ``multiprocessing`` with ``"spawn"``
+    can pickle it by reference correctly.
+
+    Args:
+        prompts: List of natural language prompts.
+        functions: Available function definitions.
+        model_name: HuggingFace model identifier (each worker loads it).
+        fast: Single-beam mode flag.
+        num_workers: Number of worker processes.
+
+    Returns:
+        Ordered list of result dicts (same order as input prompts).
+    """
+    total = len(prompts)
+    num_workers = min(num_workers, total)
+    batch_size = math.ceil(total / num_workers)
+
+    # Split prompts into batches, preserving original indices.
+    batches: list[
+        tuple[list[tuple[int, str]], str, list[FunctionDef], bool]
+    ] = []
+    for w in range(num_workers):
+        start = w * batch_size
+        end = min(start + batch_size, total)
+        if start >= total:
+            break
+        indexed = [(i, prompts[i]) for i in range(start, end)]
+        batches.append((indexed, model_name, functions, fast))
+
+    print(
+        f"Processing {total} prompts with {len(batches)} "
+        f"worker processes (each loads its own model)...",
+        flush=True,
+    )
+
+    # Use "spawn" context for portability (avoids fork + PyTorch issues).
+    ctx = multiprocessing.get_context("spawn")
+    results: list[dict[str, Any] | None] = [None] * total
+
+    with ctx.Pool(processes=len(batches)) as pool:
+        completed = 0
+        for batch_results in pool.imap_unordered(
+            worker_process_batch, batches
+        ):
+            for idx, result in batch_results:
+                results[idx] = result
+                completed += 1
+            print(
+                f"  [{completed}/{total}] prompts completed",
+                flush=True,
+            )
+
+    return [r for r in results if r is not None]
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def start_generation(args: Args) -> None:
+    """Generate function call completions for the given prompts.
+
+    When ``args.workers > 1`` and there are multiple prompts, the
+    work is distributed across separate OS processes.  Each process
+    loads its own model instance, giving true parallelism (no GIL
+    contention).  Otherwise, sequential mode is used with live
+    streaming output.
+
+    Args:
+        args: Parsed arguments containing prompts, function definitions,
+              mode, model name, and worker count.
+    """
+    if args.workers > 1 and len(args.prompts) > 1:
+        results = _generate_parallel(
+            args.prompts,
+            args.functions,
+            args.model,
+            args.mode == "fast",
+            args.workers,
+        )
+    else:
+        fast: bool = args.mode == "fast"
+        model_instance, reverse_vocab, pv, encoded_func_names = (
+            _init_model(args.model, args.functions)
+        )
+        results = _generate_sequential(
+            args.prompts, model_instance, reverse_vocab,
+            args.functions, encoded_func_names, pv, fast,
+        )
+
     write_output(results, args.output)
 
 

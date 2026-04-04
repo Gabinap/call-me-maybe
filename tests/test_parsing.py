@@ -160,6 +160,26 @@ class TestArgs(unittest.TestCase):
         args = Args(model="meta-llama/Llama-3-8B")
         self.assertEqual(args.model, "meta-llama/Llama-3-8B")
 
+    def test_default_workers(self) -> None:
+        args = Args()
+        self.assertEqual(args.workers, 1)
+
+    def test_custom_workers(self) -> None:
+        args = Args(workers=4)
+        self.assertEqual(args.workers, 4)
+
+    def test_invalid_workers_zero(self) -> None:
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            Args(workers=0)
+
+    def test_invalid_workers_too_high(self) -> None:
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            Args(workers=9)
+
 
 # ---------------------------------------------------------------------------
 # _validate_param_schema
@@ -568,6 +588,16 @@ class TestCommandParsing(unittest.TestCase):
         ):
             result = command_parsing()
         self.assertEqual(result["model"], "gpt2")
+
+    def test_default_workers(self) -> None:
+        with patch("sys.argv", ["prog"]):
+            result = command_parsing()
+        self.assertEqual(result["workers"], 1)
+
+    def test_custom_workers(self) -> None:
+        with patch("sys.argv", ["prog", "--workers", "4"]):
+            result = command_parsing()
+        self.assertEqual(result["workers"], 4)
 
 
 # ---------------------------------------------------------------------------

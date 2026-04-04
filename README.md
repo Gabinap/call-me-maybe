@@ -60,6 +60,8 @@ All arguments are optional and fall back to the paths shown above.
 | `--input` | `data/input/function_calling_tests.json` | JSON file containing natural language prompts |
 | `--output` | `data/output/function_calls.json` | Destination for the generated JSON output |
 | `--mode` | `fast` | `fast` or `thinking` (see below) |
+| `--model` | `Qwen/Qwen3-0.6B` | HuggingFace model name or path |
+| `--workers` | `1` | Number of worker processes for parallel prompt processing (1–8) |
 
 ### Makefile targets
 
@@ -152,6 +154,16 @@ The context string passed to `process_string` is built by appending to a list an
 
 `fast` is the default. It gives immediate visual feedback (tokens appear as they are generated) and is significantly faster. `thinking` trades speed for higher accuracy on ambiguous or negative numeric values and on string extraction tasks.
 
+### Multi-process parallel prompt processing
+
+When `--workers N` is passed with N > 1 and there are multiple prompts, the prompts are split into N contiguous batches and distributed across N separate OS processes via `multiprocessing.Pool` (using the `"spawn"` start method for portability).
+
+Each worker process loads its own independent copy of the model, builds its own vocabulary and `PrecomputedVocab`. This means N × ~1.2 GB of RAM for the Qwen3-0.6B model, but in return every process has its own Python interpreter and its own GIL — so all constrained-decoding loops, regex matching, numpy operations, and PyTorch forward passes run with true parallelism. This is the critical difference from threading: threads share the GIL and can only overlap during C-level PyTorch calls, while processes overlap on everything.
+
+Results carry their original prompt index and are reassembled in order in the parent process once all workers complete. Each child process redirects `sys.stdout` to `/dev/null` at startup to suppress the token-by-token streaming output that would otherwise interleave across workers and produce garbled text. The parent process keeps its own stdout and prints a clean progress counter instead.
+
+When `--workers 1` (default) or there is only one prompt, sequential mode runs with full streaming output as before.
+
 ### Output format
 
 The output is a valid JSON array written to the path specified by `--output`. Types are cast to their schema-declared Python equivalents before serialisation (`float` for `number`, `int` for `integer`, stripped string for `string`) so `json.dump` produces the correct JSON types without extra encoding logic. Numbers of type `number` always include a decimal point (e.g. `42.0`) so JSON parsers treat them as floats.
@@ -180,6 +192,8 @@ All timings on CPU (no GPU):
 
 The LLM forward pass dominates. The non-LLM optimisations (`PrecomputedVocab`, numpy, step cache) reduce the Python overhead between passes to negligible levels.
 
+With `--workers 4` on CPU, the full test suite (12 prompts) completes approximately 3–4× faster than single-process mode. Unlike threading, each worker process has its own GIL, so all Python code (regex matching, numpy, constrained decoding logic) runs truly in parallel alongside the PyTorch forward passes. The trade-off is memory: each worker loads its own model copy (~1.2 GB for Qwen3-0.6B).
+
 ### Reliability
 
 100% valid JSON output is guaranteed by construction: constrained decoding never produces a token that would make the value structurally invalid, and the output is assembled from typed Python values before being serialised by `json.dump`.
@@ -204,6 +218,10 @@ The first implementation of the negative beam used `forced_starts=[None, minus_i
 
 Without a hard token limit, string generation could loop indefinitely when no token in the vocabulary could close the current partial string. The `max_tokens=50` parameter and the `fallback_ids` list (tokens whose appended form satisfies `complete_pattern`) together guarantee termination.
 
+### Multi-process orchestration
+
+Using `multiprocessing` instead of threading introduces three constraints. First, everything passed to a worker must be picklable — this rules out closures and lambdas, so `worker_process_batch` is a top-level function in `src/worker.py` (not in `__main__`) that receives only plain data (strings, lists, Pydantic models). The separate module is required because `multiprocessing` with `"spawn"` pickles function references by module path, and `__main__` resolves to Python's built-in launcher module in child processes. Second, each worker must load its own model independently (~3–5 s startup per worker), so the approach only pays off when the per-prompt inference time significantly exceeds this startup cost. Third, child processes inherit the parent's `stdout` file descriptor, so the token-by-token streaming output from constrained decoding would interleave across workers and produce garbled text. The fix is to redirect `sys.stdout` to `os.devnull` at the start of each worker, leaving the parent's stdout clean for progress reporting. For the provided test suite (12 prompts, ~10–15 s each), 2–4 workers give a near-linear speedup. The `"spawn"` start method is used instead of `"fork"` to avoid well-known issues with PyTorch and forked processes (deadlocks on CUDA locks, corrupted internal state).
+
 ---
 
 ## Testing Strategy
@@ -219,7 +237,8 @@ All tests run without loading the LLM. The model is replaced by `MagicMock` obje
 | `test_parsing.py` | `FunctionDef`, `Args`, `_validate_param_schema`, `_validate_parameters`, `prompt_parsing`, `functions_def_parsing`, `command_parsing`, `parse` |
 | `test_process.py` | `PrecomputedVocab.build`, all regex patterns, `_ensure_float_dot`, `score_candidates` (streaming, caching, beams, scoring), `_get_minus_token`, `_score_with_negative`, all `process_*` functions |
 | `test_get_from_llm.py` | `_cast`, `_generate_object` (flat, nested, recursion, indentation), `get_valid_function_name`, `get_function_parameters` |
-| `test_main.py` | `get_vocabulary`, `write_output` (paths, types, non-ASCII, error handling) |
+| `test_main.py` | `get_vocabulary`, `write_output` (paths, types, non-ASCII, error handling), `_generate_parallel` (order preservation, worker capping) |
+| `test_worker.py` | `_get_vocabulary`, `_init_model`, `_process_one_prompt`, `worker_process_batch` (indexed results, error handling, stdout silencing, multi-prompt batches) |
 
 ### Edge cases covered
 
@@ -230,6 +249,7 @@ All tests run without loading the LLM. The model is replaced by `MagicMock` obje
 - JSON error handling: missing files, malformed JSON, wrong structure
 - Nested objects: valid recursion, invalid schemas dropped with warnings
 - `OSError` on output write does not crash the program
+- Multiprocessing: result order preserved across workers, per-prompt errors handled gracefully, worker count capped at prompt count, stdout silenced in child processes
 
 ---
 
@@ -251,6 +271,22 @@ uv run python -m src \
   --input data/input/function_calling_tests.json \
   --output data/output/results.json \
   --mode thinking
+```
+
+### Multi-process (4 workers)
+
+```bash
+uv run python -m src \
+  --workers 4 \
+  --mode fast
+```
+
+### Custom model
+
+```bash
+uv run python -m src \
+  --model Qwen/Qwen3-0.6B \
+  --workers 2
 ```
 
 ### Input: `functions_definition.json`
