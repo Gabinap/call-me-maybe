@@ -220,7 +220,10 @@ def start_generation(args: Args) -> None:
 
 def main() -> None:
     """Main entry point for the function calling generation task."""
-    start_generation(parse())
+    try:
+        start_generation(parse())
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 if __name__ == "__main__":

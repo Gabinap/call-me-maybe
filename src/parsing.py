@@ -57,9 +57,10 @@ class Args(BaseModel):
     )
     workers: int = Field(
         default=1,
-        description="Number of worker processes for parallel prompt processing.",
+        description="Number of worker processes for "
+        "parallel prompt processing.",
         ge=1,
-        le=8,
+        le=4,
     )
     prompts: list[str] = Field(
         default_factory=list,
@@ -322,7 +323,7 @@ def command_parsing() -> dict[str, Any]:
         "--workers",
         type=int,
         default=1,
-        help="Number of worker processes for parallel prompt processing (1-8).",
+        help="Number of worker processes for parallel prompt processing (1-4).",
     )
 
     return {
@@ -337,7 +338,11 @@ def parse() -> Args:
     Returns:
         Fully populated Args instance.
     """
-    cli: dict[str, Any] = command_parsing()
-    cli["functions"] = functions_def_parsing(cli["functions_definition"])
-    cli["prompts"] = prompt_parsing(cli["input"])
-    return Args(**cli)
+    try:
+        cli: dict[str, Any] = command_parsing()
+        cli["functions"] = functions_def_parsing(cli["functions_definition"])
+        cli["prompts"] = prompt_parsing(cli["input"])
+        return Args(**cli)
+    except Exception as e:
+        print(f"Error: {e}")
+        return Args()

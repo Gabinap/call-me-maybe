@@ -7,14 +7,10 @@ Note: get_vocabulary and write_output are imported directly from the module.
 
 import json
 import os
-import sys
 import tempfile
 import unittest
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.__main__ import (  # noqa: E402
     _generate_parallel,
